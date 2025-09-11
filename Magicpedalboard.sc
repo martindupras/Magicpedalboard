@@ -1,5 +1,5 @@
 MagicPedalboard : Object {
-    classvar version = "v0.2.1";
+    classvar version = "v0.2.3";
 
     var < chainA;
     var < chainB;
@@ -12,19 +12,22 @@ MagicPedalboard : Object {
 
     init {
         chainA = [\out, \ts2];
-        chainB = [\out, \ts2];
+        chainB = [\out, \ts3];
         currentChain = chainA;
         nextChain = chainB;
         this.rebuild;
+        this.playCurrent;
         this.printChains;
     }
 
     switchChain {
         var temp;
+        this.stopCurrent;
         temp = currentChain;
         currentChain = nextChain;
         nextChain = temp;
         this.rebuild;
+        this.playCurrent;
         this.printChains;
     }
 
@@ -55,7 +58,6 @@ MagicPedalboard : Object {
                 Ndef(leftKey) <<> Ndef(rightKey);
                 index = index + 1;
             };
-            Ndef(currentChain[0]).play(numChannels: 2);
             ("chain rebuilt: " ++ currentChain).postln;
         };
     }
@@ -73,9 +75,16 @@ MagicPedalboard : Object {
                 Ndef(leftKey).set(\in, Ndef(rightKey));
                 index = index + 1;
             };
-            Ndef(currentChain[0]).play(numChannels: 2);
             ("chain rebuilt (explicit): " ++ currentChain).postln;
         };
+    }
+
+    playCurrent {
+        Ndef(currentChain[0]).play(numChannels: 2);
+    }
+
+    stopCurrent {
+        Ndef(currentChain[0]).stop;
     }
 
     add { | key |
@@ -129,10 +138,13 @@ MagicPedalboard : Object {
     }
 
     printChains {
-        "Current chain:".postln;
-        currentChain.postln;
-        "Next chain:".postln;
-        nextChain.postln;
+        var labelA, labelB;
+        labelA = if(currentChain === chainA) { "Current Chain: Chain A" } { "Next Chain: Chain A" };
+        labelB = if(currentChain === chainB) { "Current Chain: Chain B" } { "Next Chain: Chain B" };
+        labelA.postln;
+        chainA.postln;
+        labelB.postln;
+        chainB.postln;
     }
 
     help {
@@ -146,6 +158,7 @@ MagicPedalboard : Object {
         "  swap(i, j) - swap two nodes\n" ++
         "  bypass - remove last processor\n" ++
         "  bypassAt(index) - remove processor at index\n" ++
+        "  playCurrent / stopCurrent - control playback of current chain\n" ++
         "  rebuildExplicit - use .set(\\in, ...) instead of <<>\n"
         .postln;
     }

@@ -17,7 +17,7 @@ Ndef(\ts4, { Dust.ar(200) ! 2 });                            // sparser bursts
 Ndef(\p1, { var inSig; inSig = \in.ar(2) * 0.5; inSig });
 Ndef(\p2, { var inSig; inSig = \in.ar(2) * 0.2; inSig });
 Ndef(\p3, { var inSig; inSig = \in.ar(2);       inSig });
-Ndef(\p4, { var inSig; inSig = \in.ar(2);       inSig });
+Ndef(\p4, { var inSig; inSig = \in.ar(2) *SinOsc.ar(7).range(0,1);       inSig });
 Ndef(\p5, { var inSig; inSig = \in.ar(2);       inSig });
 Ndef(\p6, { var inSig; inSig = \in.ar(2);       inSig });
 
@@ -33,7 +33,7 @@ Ndef(\ts2).stop;
 ~mpb = MagicPedalboard.new;
 
 // Add processors to next chain
-~mpb.add(\p1);
+~mpb.add(\p4);
 ~mpb.add(\p2);
 ~mpb.addAt(\p3, 1);
 
