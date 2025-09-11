@@ -3,7 +3,7 @@
     - Chains are Arrays of Symbols ordered [sink, …, source].
     - Uses JITLib embedding: Ndef(left) <<> Ndef(right).
     - Creates two sinks: \chainA and \chainB, and plays the current chain on init.
-    - Most mutators act on next chain; bypass and bypassAt also provided for current chain.
+    - Most mutators act on the next chain; explicit current-chain bypass helpers are provided.
 */
 
 MagicPedalboardNew : Object {
@@ -11,14 +11,13 @@ MagicPedalboardNew : Object {
     // ───────────────────────────────────────────────────────────────
     // class metadata
     // ───────────────────────────────────────────────────────────────
-    classvar < version = "v0.0";
+    classvar < version = "v0.1.3";
 
     // ───────────────────────────────────────────────────────────────
     // instance state
     // ───────────────────────────────────────────────────────────────
-    var < currentChain;   // points to either chainAList or chainBList (read-only getter)
-    var < nextChain;      // points to the other list (read-only getter)
-
+    var < currentChain;   // points to either chainAList or chainBList
+    var < nextChain;      // points to the other list
     var chainAList;       // [\chainA, ...processors..., source]
     var chainBList;       // [\chainB, ...processors..., source]
 
@@ -32,7 +31,8 @@ MagicPedalboardNew : Object {
     // class init
     // ───────────────────────────────────────────────────────────────
     *initClass {
-        version = "0.1.0";
+        //version = "v0.1.3";
+        ("MagicPedalboardNew " ++ version).postln;
     }
 
     *new {
@@ -45,16 +45,12 @@ MagicPedalboardNew : Object {
     init {
         var sinkFunc;
 
-        // declare all variables first (style)
         defaultNumChannels = 2;
-        // choose a sensible silent default; test code will set an audible source
-        defaultSource = \ts0;
-
-        // create two sinks that just pass through \in in stereo
+        defaultSource = \ts0; // silent by default; tests set audible sources
         sinkFunc = {
-            var inSig;
-            inSig = \in.ar(defaultNumChannels);
-            inSig
+            var inputSignal;
+            inputSignal = \in.ar(defaultNumChannels);
+            inputSignal
         };
 
         Ndef(\chainA, sinkFunc);
@@ -66,11 +62,9 @@ MagicPedalboardNew : Object {
         bypassA = IdentityDictionary.new;
         bypassB = IdentityDictionary.new;
 
-        // point current/next
         currentChain = chainAList;
         nextChain = chainBList;
 
-        // (re)build both; play current, stop next
         this.rebuild(currentChain);
         this.rebuild(nextChain);
         Ndef(\chainA).play(numChannels: defaultNumChannels);
@@ -81,38 +75,37 @@ MagicPedalboardNew : Object {
     // ───────────────────────────────────────────────────────────────
     // public API
     // ───────────────────────────────────────────────────────────────
-
     help {
-        var text;
-        text = String.new;
-        text = text
-        ++ "MagicPedalboardNew v" ++ version ++ "\n"
+        var helpText;
+        helpText = String.new;
+        helpText = helpText
+        ++ "MagicPedalboardNew " ++ version ++ "\n"
         ++ "Chains are Arrays of Symbols ordered [sink, …, source].\n"
         ++ "On init, creates \\chainA and \\chainB and plays current.\n\n"
         ++ "Core methods (mostly operate on the *next* chain):\n"
         ++ "  printChains\n"
         ++ "  playCurrent, stopCurrent, switchChain\n"
         ++ "  add(key), addAt(key, index)\n"
-        ++ "  removeAt(index), swap(i, j)\n"
+        ++ "  removeAt(index), swap(indexA, indexB)\n"
         ++ "  bypass(key, state=true), bypassAt(index, state=true)\n"
         ++ "  clearChain\n"
-        ++ "Current-chain bypass:\n"
+        ++ "Current-chain bypass helpers:\n"
         ++ "  bypassCurrent(key, state=true), bypassAtCurrent(index, state=true)\n";
-        text.postln;
+        helpText.postln;
     }
 
     printChains {
-        var markCurrent, markNext;
-        markCurrent = { |list| if(list === currentChain) { "  (current)" } { "" } };
-        markNext = { |list| if(list === nextChain) { "  (next)" } { "" } };
+        var annotateCurrent, annotateNext;
+        annotateCurrent = { |listRef| if(listRef === currentChain) { "  (current)" } { "" } };
+        annotateNext = { |listRef| if(listRef === nextChain) { "  (next)" } { "" } };
 
         "MagicPedalboardNew.printChains:".postln;
 
-        ("A: " ++ chainAList ++ markCurrent.(chainAList) ++ markNext.(chainAList)).postln;
-        ("   bypassA: " ++ this.bypassKeysForList(chainAList)).postln;
+        ("A: " ++ chainAList ++ annotateCurrent.(chainAList) ++ annotateNext.(chainAList)).postln;
+        ("   bypassA: " ++ this.bypassKeysForListInternal(chainAList)).postln;
 
-        ("B: " ++ chainBList ++ markCurrent.(chainBList) ++ markNext.(chainBList)).postln;
-        ("   bypassB: " ++ this.bypassKeysForList(chainBList)).postln;
+        ("B: " ++ chainBList ++ annotateCurrent.(chainBList) ++ annotateNext.(chainBList)).postln;
+        ("   bypassB: " ++ this.bypassKeysForListInternal(chainBList)).postln;
     }
 
     playCurrent {
@@ -129,38 +122,35 @@ MagicPedalboardNew : Object {
     }
 
     switchChain {
-        var tmp, oldSink, newSink;
+        var tempChainRef, oldSinkKey, newSinkKey;
 
-        // stop current sink, swap pointers, then play new current
-        oldSink = currentChain[0];
-        Ndef(oldSink).stop;
+        oldSinkKey = currentChain[0];
+        Ndef(oldSinkKey).stop;
 
-        tmp = currentChain;
+        tempChainRef = currentChain;
         currentChain = nextChain;
-        nextChain = tmp;
+        nextChain = tempChainRef;
 
-        // ensure graphs are rebuilt appropriately
         this.rebuild(nextChain);
         this.rebuild(currentChain);
 
-        newSink = currentChain[0];
-        Ndef(newSink).play(numChannels: defaultNumChannels);
+        newSinkKey = currentChain[0];
+        Ndef(newSinkKey).play(numChannels: defaultNumChannels);
     }
 
     // ---- next-chain mutations ------------------------------------------------
 
     add { | key |
-        var index;
-        // insert just before source (right side)
-        index = nextChain.size - 1;
-        this.addAt(key, index);
+        var insertIndex;
+        insertIndex = nextChain.size - 1; // just before source
+        this.addAt(key, insertIndex);
     }
 
     addAt { | key, index |
         var indexClamped, newList;
         indexClamped = index.clip(1, nextChain.size - 1); // never before sink
         newList = nextChain.insert(indexClamped, key);    // returns a new Array
-        this.setNextList(newList);
+        this.setNextListInternal(newList);
         this.rebuild(nextChain);
     }
 
@@ -179,10 +169,9 @@ MagicPedalboardNew : Object {
                 removedKey = nextChain[index];
                 newList = nextChain.copy;
                 newList.removeAt(index);
-                this.setNextList(newList);
 
-                // if it had a bypass flag, drop it
-                this.bypassDictForList(nextChain).removeAt(removedKey);
+                this.setNextListInternal(newList);
+                this.bypassDictForListInternal(nextChain).removeAt(removedKey);
 
                 this.rebuild(nextChain);
                 ("removed: " ++ removedKey).postln;
@@ -190,24 +179,23 @@ MagicPedalboardNew : Object {
         }
     }
 
-    swap { | i, j |
-        var lastIndex, a, b, newList, tempKey;
+    swap { | indexAParam, indexBParam |
+        var lastIndex, indexA, indexB, newList, tempKey;
 
         lastIndex = nextChain.size - 1;
 
-        // clamp into processor region only (exclude sink=0 and source=last)
-        a = i.clip(1, lastIndex - 1);
-        b = j.clip(1, lastIndex - 1);
+        indexA = indexAParam.clip(1, lastIndex - 1);
+        indexB = indexBParam.clip(1, lastIndex - 1);
 
-        if(a == b) {
+        if(indexA == indexB) {
             // nothing to do
         }{
             newList = nextChain.copy;
-            tempKey = newList[a];
-            newList[a] = newList[b];
-            newList[b] = tempKey;
+            tempKey = newList[indexA];
+            newList[indexA] = newList[indexB];
+            newList[indexB] = tempKey;
 
-            this.setNextList(newList);
+            this.setNextListInternal(newList);
             this.rebuild(nextChain);
         }
     }
@@ -221,42 +209,42 @@ MagicPedalboardNew : Object {
         sourceKey = nextChain[nextChain.size - 1];
 
         newList = [sinkKey, sourceKey];
-        this.setNextList(newList);
+        this.setNextListInternal(newList);
 
-        this.bypassDictForList(nextChain).clear;
+        this.bypassDictForListInternal(nextChain).clear;
         this.rebuild(nextChain);
     }
 
     bypass { | key, state = true |
         var dict;
-        dict = this.bypassDictForList(nextChain);
+        dict = this.bypassDictForListInternal(nextChain);
         dict[key] = state;
         this.rebuild(nextChain);
     }
 
     bypassAt { | index, state = true |
-        var lastIndex, clamped, key;
+        var lastIndex, clampedIndex, keyAtIndex;
         lastIndex = nextChain.size - 1;
-        clamped = index.clip(1, lastIndex - 1);
-        key = nextChain[clamped];
-        this.bypass(key, state);
+        clampedIndex = index.clip(1, lastIndex - 1);
+        keyAtIndex = nextChain[clampedIndex];
+        this.bypass(keyAtIndex, state);
     }
 
     // ---- current-chain bypass ------------------------------------------------
 
     bypassCurrent { | key, state = true |
         var dict;
-        dict = this.bypassDictForList(currentChain);
+        dict = this.bypassDictForListInternal(currentChain);
         dict[key] = state;
         this.rebuild(currentChain);
     }
 
     bypassAtCurrent { | index, state = true |
-        var lastIndex, clamped, key;
+        var lastIndex, clampedIndex, keyAtIndex;
         lastIndex = currentChain.size - 1;
-        clamped = index.clip(1, lastIndex - 1);
-        key = currentChain[clamped];
-        this.bypassCurrent(key, state);
+        clampedIndex = index.clip(1, lastIndex - 1);
+        keyAtIndex = currentChain[clampedIndex];
+        this.bypassCurrent(keyAtIndex, state);
     }
 
     // ---- optional: set source (handy for tests) ------------------------------
@@ -266,7 +254,7 @@ MagicPedalboardNew : Object {
         lastIndex = nextChain.size - 1;
         newList = nextChain.copy;
         newList[lastIndex] = key;
-        this.setNextList(newList);
+        this.setNextListInternal(newList);
         this.rebuild(nextChain);
     }
 
@@ -275,15 +263,19 @@ MagicPedalboardNew : Object {
         lastIndex = currentChain.size - 1;
         newList = currentChain.copy;
         newList[lastIndex] = key;
-        if(currentChain === chainAList) { chainAList = newList; currentChain = chainAList; } { chainBList = newList; currentChain = chainBList; };
+        if(currentChain === chainAList) {
+            chainAList = newList; currentChain = chainAList;
+        }{
+            chainBList = newList; currentChain = chainBList;
+        };
         this.rebuild(currentChain);
     }
 
     // ───────────────────────────────────────────────────────────────
-    // private helpers
+    // internal helpers (lowercase, no leading underscore)
     // ───────────────────────────────────────────────────────────────
 
-    setNextList { | newList |
+    setNextListInternal { | newList |
         if(nextChain === chainAList) {
             chainAList = newList; nextChain = chainAList;
         }{
@@ -291,17 +283,21 @@ MagicPedalboardNew : Object {
         }
     }
 
-    bypassDictForList { | list |
-        ^if(list === chainAList) { bypassA } { bypassB }
+    bypassDictForListInternal { | listRef |
+        ^if(listRef === chainAList) { bypassA } { bypassB }
     }
 
-    bypassKeysForList { | list |
-        var dict;
-        dict = this.bypassDictForList(list);
-        ^dict.keysValuesCollect { |k, v| if(v) { k } { nil } }.reject(_.isNil)
+    bypassKeysForListInternal { | listRef |
+        var dict, keysBypassed;
+        dict = this.bypassDictForListInternal(listRef);
+        keysBypassed = Array.new;
+        dict.keysValuesDo { |key, state|
+            if(state == true) { keysBypassed = keysBypassed.add(key) };
+        };
+        ^keysBypassed
     }
 
-    ensureStereo { | key |
+    ensureStereoInternal { | key |
         var proxyBus;
         proxyBus = Ndef(key).bus;
         if(proxyBus.isNil or: { proxyBus.rate != \audio } or: { proxyBus.numChannels != defaultNumChannels }) {
@@ -309,41 +305,39 @@ MagicPedalboardNew : Object {
         };
     }
 
-    effectiveListFor { | list |
-        var dict, result, lastIndex;
+    effectiveListForInternal { | listRef |
+        var dict, resultList, lastIndex;
 
-        dict = this.bypassDictForList(list);
-        result = Array.new;
-        lastIndex = list.size - 1;
+        dict = this.bypassDictForListInternal(listRef);
+        resultList = Array.new;
+        lastIndex = listRef.size - 1;
 
-        list.do { |key, i|
+        listRef.do { |key, index|
             var isProcessor, isBypassed;
-            isProcessor = (i > 0) and: (i < lastIndex);
+            isProcessor = (index > 0) and: (index < lastIndex);
             isBypassed = isProcessor and: { dict[key] == true };
 
-            if(i == 0 or: { i == lastIndex }) {
-                result = result.add(key);            // always keep sink & source
+            if((index == 0) or: { index == lastIndex }) {
+                resultList = resultList.add(key);            // keep sink & source
             }{
                 if(isBypassed.not) {
-                    result = result.add(key);        // keep only non-bypassed processors
+                    resultList = resultList.add(key);        // keep only non-bypassed processors
                 };
             };
         };
 
-        ^result
+        ^resultList
     }
 
-    rebuild { | list |
+    rebuild { | listRef |
         var effective, index, leftKey, rightKey, sinkKey;
 
-        if(list.size < 2) { ^this };
+        if(listRef.size < 2) { ^this };
 
-        effective = this.effectiveListFor(list);
+        effective = this.effectiveListForInternal(listRef);
 
-        // keep buses consistent
-        effective.do { |key| this.ensureStereo(key) };
+        effective.do { |key| this.ensureStereoInternal(key) };
 
-        // wire: consumer receives producer at \in (default)
         index = 0;
         while { index < (effective.size - 1) } {
             leftKey = effective[index];
@@ -354,21 +348,10 @@ MagicPedalboardNew : Object {
 
         sinkKey = effective[0];
 
-        // play only if this is the current chain; otherwise stop its sink
-        if(list === currentChain) {
+        if(listRef === currentChain) {
             Ndef(sinkKey).play(numChannels: defaultNumChannels);
         }{
             Ndef(sinkKey).stop;
         };
     }
 }
-
-
-
-/*
-I'm trying to rewrite some code I have into some a supercollider class.
-
-sigChainOperations_v0.2.1.scd.txtI have started a class definition but I'm having some issues, so I'd like to see what your solution would be.
-
-I would like the class to initiate two Ndefs (\chainA and \chainB) that will be the ones that we play. We should have variables currentChain and nextChain that point to which is current and which is next. On init we should play the current chain. We should have methods for printChains, playCurrent, stopCurrent, switchChain (make next current and current becomes next); add, addAt, removeAt, swap, bypass, bypassAt, clearChain. Most of those should apply to the next chain. We should also have bypass and bypassAt for the current chain. Respect all the supercollider rules (var before statements, variables start with lowercase), descriptive variable names, space after accessor (e.g.  var < currentChain;) a help method, classvar version. Name the class MagicPedalboardNew. Please also give me some test code. Check all supercollider syntax for correctness. Ask me if anything needs clarification.
-*/
