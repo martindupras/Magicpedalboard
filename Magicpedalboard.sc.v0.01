@@ -1,0 +1,143 @@
+// Magicpedalboard.sc
+// MD 20250911-1439
+
+// v0.1.0 initial design just for testing
+
+
+MagicPedalboard : Object {
+    classvar version = "v0.1.0";
+
+    var <chainA;
+    var <chainB;
+    var <currentIsA = true;
+
+    *new {
+        ^super.new.init
+    }
+
+    init {
+        chainA = [\out, \ts2];
+        chainB = [\out, \ts2];
+        this.rebuild;
+    }
+
+    currentChain {
+        ^if(currentIsA) { chainA } { chainB }
+    }
+
+    nextChain {
+        ^if(currentIsA) { chainB } { chainA }
+    }
+
+    switchChain {
+        currentIsA = currentIsA.not;
+        this.rebuild;
+    }
+
+    clearChain {
+        if(currentIsA) {
+            chainB = [\out, \ts2];
+        } {
+            chainA = [\out, \ts2];
+        };
+        this.rebuild;
+    }
+
+    ensureStereo { |key|
+        var bus;
+        bus = Ndef(key).bus;
+        if(bus.isNil or: { bus.rate != \audio } or: { bus.numChannels != 2 }) {
+            Ndef(key).ar(2);
+        };
+    }
+
+    rebuild {
+        var list, index, leftKey, rightKey;
+        list = this.currentChain;
+        if(list.size < 2) {
+            "need at least [sink, source]".postln;
+        } {
+            list.do { |key| this.ensureStereo(key) };
+            index = 0;
+            while { index < (list.size - 1) } {
+                leftKey = list[index];
+                rightKey = list[index + 1];
+                Ndef(leftKey) <<> Ndef(rightKey);
+                index = index + 1;
+            };
+            Ndef(list[0]).play(numChannels: 2);
+            ("chain rebuilt: " ++ list).postln;
+        };
+    }
+
+    add { |key|
+        var list;
+        list = this.nextChain;
+        list = list.insert(list.size - 1, key);
+        if(currentIsA) { chainB = list } { chainA = list };
+        this.rebuild;
+    }
+
+    addAt { |key, index|
+        var list, clamped;
+        list = this.nextChain;
+        clamped = index.clip(0, list.size);
+        list = list.insert(clamped, key);
+        if(currentIsA) { chainB = list } { chainA = list };
+        this.rebuild;
+    }
+
+    removeAt { |index|
+        var list, clamped;
+        list = this.nextChain;
+        if(list.size <= 2) {
+            "refuse to remove: need at least [sink, source]".postln;
+        } {
+            clamped = index.clip(0, list.size - 1);
+            list = list.removeAt(clamped);
+            if(currentIsA) { chainB = list } { chainA = list };
+            this.rebuild;
+        };
+    }
+
+    swap { |i, j|
+        var list, temp, ia, ib;
+        list = this.nextChain;
+        if(i == j) { ^this };
+        ia = i.clip(0, list.size - 1);
+        ib = j.clip(0, list.size - 1);
+        temp = list[ia];
+        list[ia] = list[ib];
+        list[ib] = temp;
+        if(currentIsA) { chainB = list } { chainA = list };
+        this.rebuild;
+    }
+
+    bypass {
+        var list;
+        list = this.currentChain;
+        if(list.size > 2) {
+            this.removeAt(list.size - 2);
+        };
+    }
+
+    bypassAt { |index|
+        this.removeAt(index);
+    }
+
+    help {
+        "MagicPedalboard: dual-chain manager for Ndef signal routing.\n" ++
+        "Methods:\n" ++
+        "  switchChain - swap current and next chains\n" ++
+        "  clearChain - reset next chain to [\\out, \\ts2]\n" ++
+        "  add(key) - insert before output\n" ++
+        "  addAt(key, index) - insert at index\n" ++
+        "  removeAt(index) - remove node\n" ++
+        "  swap(i, j) - swap two nodes\n" ++
+        "  bypass - remove last processor\n" ++
+        "  bypassAt(index) - remove processor at index\n" ++
+        "  currentChain - get current chain\n" ++
+        "  nextChain - get next chain\n"
+        .postln;
+    }
+}
