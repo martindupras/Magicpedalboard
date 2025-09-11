@@ -1,5 +1,5 @@
 MagicPedalboard : Object {
-    classvar version = "v0.2.0";
+    classvar version = "v0.2.1";
 
     var < chainA;
     var < chainB;
@@ -16,6 +16,7 @@ MagicPedalboard : Object {
         currentChain = chainA;
         nextChain = chainB;
         this.rebuild;
+        this.printChains;
     }
 
     switchChain {
@@ -24,11 +25,13 @@ MagicPedalboard : Object {
         currentChain = nextChain;
         nextChain = temp;
         this.rebuild;
+        this.printChains;
     }
 
     clearChain {
         nextChain = [\out, \ts2];
         this.rebuild;
+        this.printChains;
     }
 
     ensureStereo { | key |
@@ -78,6 +81,7 @@ MagicPedalboard : Object {
     add { | key |
         nextChain = nextChain.insert(nextChain.size - 1, key);
         this.rebuild;
+        this.printChains;
     }
 
     addAt { | key, index |
@@ -85,6 +89,7 @@ MagicPedalboard : Object {
         clamped = index.clip(0, nextChain.size);
         nextChain = nextChain.insert(clamped, key);
         this.rebuild;
+        this.printChains;
     }
 
     removeAt { | index |
@@ -95,6 +100,7 @@ MagicPedalboard : Object {
             clamped = index.clip(0, nextChain.size - 1);
             nextChain = nextChain.removeAt(clamped);
             this.rebuild;
+            this.printChains;
         };
     }
 
@@ -107,16 +113,26 @@ MagicPedalboard : Object {
         nextChain[ia] = nextChain[ib];
         nextChain[ib] = temp;
         this.rebuild;
+        this.printChains;
     }
 
     bypass {
         if(currentChain.size > 2) {
             this.removeAt(currentChain.size - 2);
         };
+        this.printChains;
     }
 
     bypassAt { | index |
         this.removeAt(index);
+        this.printChains;
+    }
+
+    printChains {
+        "Current chain:".postln;
+        currentChain.postln;
+        "Next chain:".postln;
+        nextChain.postln;
     }
 
     help {
