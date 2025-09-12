@@ -1,39 +1,39 @@
-/* MagicDisplayGUI.sc v0.2.0
+/* MagicDisplayGUI.sc v0.2.1
  GUI display adaptor for MagicPedalboardNew.
 
- - CURRENT column is highlighted in green.
- - Top-down chain presentation: source (top) → processors (middle) → sink (bottom).
- - "What you should hear" text field + visual countdown bar and numeric label.
- - Operations panel: upcoming ops list, "Next" button starts a 3s countdown then runs the callback.
- - Integrated level meters for \chainA and \chainB (no server.sync; safe Server.default.bind).
- // MD 20250912-1556
+ - CURRENT column highlighted in green.
+ - Top-down chain: source (top) → processors → sink (bottom).
+ - "What you should hear" text field + visual countdown (numeric + bar).
+ - Operations panel: upcoming ops list, highlights NEXT; "Next" button triggers 3s countdown then runs.
+ - Embedded level meters for \chainA and \chainB (no server.sync; Server.default.bind only).
+ // MD 20250912-1640
 */
 MagicDisplayGUI : MagicDisplay {
     classvar <versionGUI;
     var <window;
 
-    // Layout elements
+    // layout elements
     var leftPanel, rightPanel;
     var leftHeader, rightHeader;
     var leftListView, rightListView;
     var leftEffective, rightEffective;
 
-    // Expectation + countdown
+    // expectation + countdown
     var expectationText;
     var countdownLabel, countdownBarView, countdownTask, countdownSecondsDefault;
 
-    // Operations panel
+    // operations panel
     var opsListView, opsNextButton, opsStatusText;
     var opsItems, opsIndexNext, opsCallback, opsCountdownSeconds;
 
-    // Meters
-    var meterViewA, meterViewB, meterWinEmbedded;
+    // meters
+    var meterViewA, meterViewB;
     var meterSynthA, meterSynthB, oscA, oscB;
     var enableMetersFlag;
 
     *initClass {
         var text;
-        versionGUI = "v0.2.0";
+        versionGUI = "v0.2.1";
         text = "MagicDisplayGUI " ++ versionGUI;
         text.postln;
     }
@@ -47,8 +47,8 @@ MagicDisplayGUI : MagicDisplay {
     initGui {
         var windowRect, panelWidth, listHeight, headerHeight, footerHeight, pad;
         var opsWidth, opsRect;
+        var selfRef;
         var buildWindow;
-        var greenBg, neutralBg;
 
         windowRect = Rect(100, 100, 980, 520);
         panelWidth = 300;
@@ -64,25 +64,23 @@ MagicDisplayGUI : MagicDisplay {
         opsCountdownSeconds = 3.0;
         enableMetersFlag = true;
 
-        greenBg = Color(0.85, 1.0, 0.85);
-        neutralBg = Color(0.92, 0.92, 0.92);
+        selfRef = this;
 
         buildWindow = {
-            var metersHeight, colLabelStyle;
+            var metersHeight, greenBg, neutralBg;
+            var buildColumn, buildMeters, applyInitialHighlight;
+            var columnLeftX, columnRightX;
 
-            var buildColumn;
-            var buildMeters;
+            metersHeight = 86;
+            greenBg = Color(0.85, 1.0, 0.85);
+            neutralBg = Color(0.92, 0.92, 0.92);
 
-            metersHeight = 86; // two rows
-            colLabelStyle = { arg textString, at;
-                var label;
-                label = StaticText(window, at).string_(textString);
-                label.align_(\center);
-                ^label
-            };
+            columnLeftX = pad;
+            columnRightX = pad + panelWidth + 40;
 
             buildColumn = { arg xPos, title;
-                var panel, header, listView, effLabel, effRect, headerRect, listRect;
+                var panel, header, listView, effectiveLabel;
+                var headerRect, listRect, effRect;
 
                 panel = CompositeView(window, Rect(xPos, pad, panelWidth, windowRect.height - 2 * pad - metersHeight));
                 panel.background_(neutralBg);
@@ -95,15 +93,14 @@ MagicDisplayGUI : MagicDisplay {
                 listView = ListView(panel, listRect).items_([]);
 
                 effRect = Rect(0, headerHeight + 6 + listHeight + 6, panelWidth, footerHeight);
-                effLabel = StaticText(panel, effRect).string_("eff: —");
-                effLabel.align_(\center);
+                effectiveLabel = StaticText(panel, effRect).string_("eff: —");
+                effectiveLabel.align_(\center);
 
-                ^(panel: panel, header: header, list: listView, eff: effLabel)
+                ^(panel: panel, header: header, list: listView, eff: effectiveLabel)
             };
 
             buildMeters = {
-                var metersGroup, labelA, labelB, row1, row2;
-                var labelWidth, barWidth, rowHeight;
+                var metersGroup, labelA, labelB, row1, row2, labelWidth, barWidth, rowHeight;
 
                 labelWidth = 60;
                 barWidth = windowRect.width - 2 * pad - labelWidth - 10;
@@ -123,29 +120,33 @@ MagicDisplayGUI : MagicDisplay {
                 meterViewB = LevelIndicator(row2, Rect(labelWidth + 6, 4, barWidth, 20));
             };
 
+            applyInitialHighlight = {
+                var currentBg, nextBg;
+                currentBg = greenBg;
+                nextBg = neutralBg;
+                if(leftPanel.notNil) { leftPanel[\panel].background_(currentBg) };
+                if(rightPanel.notNil) { rightPanel[\panel].background_(nextBg) };
+            };
+
             window = Window("MagicDisplayGUI – CURRENT / NEXT", windowRect).front.alwaysOnTop_(true);
 
-            // Columns
-            leftPanel = buildColumn.(pad, "CURRENT");
-            rightPanel = buildColumn.(pad + panelWidth + 40, "NEXT");
+            leftPanel = buildColumn.value(columnLeftX, "CURRENT");
+            rightPanel = buildColumn.value(columnRightX, "NEXT");
 
-            // Expectation + countdown controls along the top, across columns
             expectationText = TextView(window, Rect(pad, leftPanel[\panel].bounds.bottom + 6, 2 * panelWidth + 40, 52));
             expectationText.background_(Color(1, 1, 0.9));
             expectationText.string_("What you should hear will appear here…");
 
             countdownLabel = StaticText(window, Rect(pad, expectationText.bounds.bottom + 6, 120, 20)).string_("Ready");
+
             countdownBarView = UserView(window, Rect(pad + 130, expectationText.bounds.bottom + 6, panelWidth - 10, 20));
             countdownBarView.background_(Color(0.9, 0.9, 0.9));
             countdownBarView.drawFunc_({ arg view;
-                var barWidthNow, fullWidth, fraction, colorFill;
-                var haveTask, progressData;
-                // var-first inside block
-                haveTask = countdownTask.notNil;
-                progressData = view.getProperty(\progress) ? 0.0;
-                fraction = progressData.clip(0, 1);
+                var barWidthNow, fullWidth, progressFraction, colorFill, progressStored;
+                progressStored = view.getProperty(\progress) ? 0.0;
+                progressFraction = progressStored.clip(0, 1);
                 fullWidth = view.bounds.width;
-                barWidthNow = fullWidth * fraction;
+                barWidthNow = fullWidth * progressFraction;
                 colorFill = Color(0.3, 0.8, 0.3);
                 Pen.fillColor = colorFill;
                 Pen.addRect(Rect(0, 0, barWidthNow, view.bounds.height));
@@ -153,7 +154,7 @@ MagicDisplayGUI : MagicDisplay {
             });
             countdownBarView.setProperty(\progress, 0.0);
 
-            // Operations panel
+            // Operations list + button
             opsItems = Array.new;
             opsIndexNext = 0;
             opsCallback = nil;
@@ -163,47 +164,45 @@ MagicDisplayGUI : MagicDisplay {
             opsNextButton = Button(window, Rect(opsRect.right - 100, opsRect.bottom - 56, 100, 28))
                 .states_([["Next (3s)", Color.white, Color(0, 0.5, 0)]])
                 .action_({
-                    var nextIndex, totalCount, nextItem;
-                    // var-first in block
-                    nextIndex = opsIndexNext;
-                    totalCount = opsItems.size;
-                    if(nextIndex >= totalCount) { "No more operations.".postln; ^this };
-                    nextItem = opsItems[nextIndex];
-                    this.startCountdown(opsCountdownSeconds, "Next: " ++ nextItem, {
+                    var nextIndexLocal, totalCountLocal, nextLabel;
+                    nextIndexLocal = opsIndexNext;
+                    totalCountLocal = opsItems.size;
+                    if(nextIndexLocal >= totalCountLocal) { "No more operations.".postln; ^nil };
+                    nextLabel = opsItems[nextIndexLocal];
+                    selfRef.startCountdown(opsCountdownSeconds, "Next: " ++ nextLabel, {
                         var clampedIndex;
-                        clampedIndex = opsIndexNext.min(opsItems.size - 1).max(0);
-                        this.runNextOperation(clampedIndex);
+                        clampedIndex = opsIndexNext.clip(0, opsItems.size - 1);
+                        selfRef.runNextOperation(clampedIndex);
                     });
                 });
 
-            // Meters at bottom
-            buildMeters.();
-
-            // Apply initial highlight: CURRENT green
-            this.highlightCurrentColumn;
+            buildMeters.value;
+            applyInitialHighlight.value;
         };
 
         AppClock.sched(0, {
+            var enableNow;
             buildWindow.value;
-            if(enableMetersFlag) { this.enableMeters(true) };
+            enableNow = enableMetersFlag;
+            if(enableNow) { this.enableMeters(true) };
             nil
         });
 
         ^this
     }
 
-    // ─── Utility: highlight CURRENT column ─────────────────────────
+    // ─── highlight CURRENT column ─────────────────────────────────
     highlightCurrentColumn {
         var greenBg, neutralBg;
         greenBg = Color(0.85, 1.0, 0.85);
         neutralBg = Color(0.92, 0.92, 0.92);
-        if(leftPanel.notNil) { leftPanel[\panel].background = greenBg };
-        if(rightPanel.notNil) { rightPanel[\panel].background = neutralBg };
+        if(leftPanel.notNil) { leftPanel[\panel].background_(greenBg) };
+        if(rightPanel.notNil) { rightPanel[\panel].background_(neutralBg) };
     }
 
-    // ─── Top-to-bottom formatting (src → procs → sink) ────────────
+    // ─── format src → procs → sink ────────────────────────────────
     formatListTopDown { arg listRef, bypassKeys, effectiveList;
-        var itemsOut, lastIndex, processorsList, indexCounter, sourceKey, sinkKey;
+        var itemsOut, lastIndex, processorsList, indexCounter, sourceKey, sinkKey, isBypassed, badge, lineText;
         itemsOut = Array.new;
         lastIndex = listRef.size - 1;
         sinkKey = listRef[0];
@@ -213,17 +212,15 @@ MagicDisplayGUI : MagicDisplay {
 
         if(listRef.size > 2) {
             itemsOut = itemsOut.add("procs:");
-            processorsList = listRef.copyRange(1, lastIndex - 1);
-            processorsList = processorsList; // keep chain order nearest sink first, still listed top-down
+            processorsList = listRef.copyRange(1, lastIndex - 1).reverse; // top→down from src to sink
             indexCounter = 1;
-            processorsList.reverse.do { arg procKey; // visually top→down from source toward sink
-                var isBypassed, badge, lineText;
+            processorsList.do({ arg procKey;
                 isBypassed = bypassKeys.includes(procKey);
                 badge = if(isBypassed) { "[BYP]" } { "[ON]" };
-                lineText = ("  [" ++ indexCounter ++ "] " ++ procKey ++ " " ++ badge);
+                lineText = "  [" ++ indexCounter ++ "] " ++ procKey ++ " " ++ badge;
                 itemsOut = itemsOut.add(lineText);
                 indexCounter = indexCounter + 1;
-            };
+            });
         }{
             itemsOut = itemsOut.add("procs: (none)");
         };
@@ -233,18 +230,20 @@ MagicDisplayGUI : MagicDisplay {
         ^itemsOut
     }
 
-    // ─── Expectation + countdown API ──────────────────────────────
+    // ─── expectation + countdown ──────────────────────────────────
     showExpectation { arg textString, seconds = 0;
-        var secondsLocal;
+        var secondsLocal, hasCountdown;
         secondsLocal = seconds ? 0;
+        hasCountdown = secondsLocal > 0;
+
         AppClock.sched(0, {
-            var hasCountdown;
-            expectationText.string = textString.asString;
-            hasCountdown = secondsLocal > 0;
+            var labelNow;
+            expectationText.string_(textString.asString);
             if(hasCountdown) {
-                this.startCountdown(secondsLocal, "Listen in…", { /* no-op here */ });
+                this.startCountdown(secondsLocal, "Listen in…", { nil });
             }{
-                countdownLabel.string = "Ready";
+                labelNow = "Ready";
+                countdownLabel.string_(labelNow);
                 countdownBarView.setProperty(\progress, 0.0);
                 countdownBarView.refresh;
             };
@@ -253,61 +252,63 @@ MagicDisplayGUI : MagicDisplay {
     }
 
     startCountdown { arg seconds, labelText, onFinishedFunc;
-        var secondsClamped, startTime, stopTime, taskFunc;
+        var secondsClamped, startTime, stopTime, selfRef;
         secondsClamped = seconds.clip(0.5, 10.0);
         startTime = Main.elapsedTime;
         stopTime = startTime + secondsClamped;
+        selfRef = this;
 
         if(countdownTask.notNil) { countdownTask.stop; countdownTask = nil };
 
         AppClock.sched(0, {
-            var updateFunc;
-            countdownLabel.string = labelText.asString ++ " (" ++ secondsClamped.asString ++ "s)";
+            var finishedFlag, delaySeconds;
+            var updateAndCheckDone;
+
+            countdownLabel.string_(labelText.asString ++ " (" ++ secondsClamped.asString ++ "s)");
             countdownBarView.setProperty(\progress, 0.0);
             countdownBarView.refresh;
 
-            updateFunc = {
-                var nowTime, remaining, fraction;
+            finishedFlag = false;
+            delaySeconds = 0.05;
+
+            updateAndCheckDone = {
+                var nowTime, remainingSeconds, progressFraction;
                 nowTime = Main.elapsedTime;
-                remaining = (stopTime - nowTime).max(0);
-                fraction = ((secondsClamped - remaining) / secondsClamped).clip(0.0, 1.0);
-                countdownLabel.string = labelText.asString ++ " (" ++ remaining.round(0.1).asString ++ "s)";
-                countdownBarView.setProperty(\progress, fraction);
+                remainingSeconds = (stopTime - nowTime).max(0);
+                progressFraction = ((secondsClamped - remainingSeconds) / secondsClamped).clip(0.0, 1.0);
+
+                countdownLabel.string_(labelText.asString ++ " (" ++ remainingSeconds.round(0.1).asString ++ "s)");
+                countdownBarView.setProperty(\progress, progressFraction);
                 countdownBarView.refresh;
-                if(remaining <= 0) {
-                    countdownTask.stop;
-                    countdownTask = nil;
-                    countdownLabel.string = "Now";
-                    if(onFinishedFunc.notNil) { onFinishedFunc.value };
-                    ^nil;
-                }{
-                    ^0.05;
-                };
+
+                if(remainingSeconds <= 0) { finishedFlag = true };
             };
 
             countdownTask = Task({
-                var delay;
-                delay = 0.05;
-                while({ true }, {
-                    var schedResult;
-                    schedResult = updateFunc.value;
-                    if(schedResult.isNil) { ^this };
-                    delay.wait;
+                var localFinished;
+                localFinished = false;
+                while({ localFinished.not }, {
+                    updateAndCheckDone.value;
+                    localFinished = finishedFlag;
+                    delaySeconds.wait;
                 });
+                countdownLabel.string_("Now");
+                if(onFinishedFunc.notNil) { onFinishedFunc.value };
             }, AppClock).play;
+
             nil
         });
     }
 
-    // ─── Operations panel API ─────────────────────────────────────
+    // ─── operations panel ─────────────────────────────────────────
     setOperations { arg itemsArray;
-        var itemsSafe;
+        var itemsSafe, entryStrings;
         itemsSafe = itemsArray ? Array.new;
+        entryStrings = itemsSafe;
+
         AppClock.sched(0, {
-            var displayArray;
-            opsItems = itemsSafe.collect({ arg it; it.asString });
-            displayArray = opsItems;
-            opsListView.items = displayArray;
+            opsItems = entryStrings.collect({ arg it; it.asString });
+            opsListView.items_(opsItems);
             opsIndexNext = 0;
             this.updateOpsHighlight;
             nil
@@ -315,13 +316,15 @@ MagicDisplayGUI : MagicDisplay {
     }
 
     setNextAction { arg func;
-        opsCallback = func;
+        var f;
+        f = func;
+        opsCallback = f;
     }
 
     runNextOperation { arg indexToRun;
-        var labelText, totalCount;
-        labelText = if(indexToRun < opsItems.size) { opsItems[indexToRun] } { "—" };
+        var totalCount, labelText, nextIndexComputed;
         totalCount = opsItems.size;
+        labelText = if(indexToRun < totalCount) { opsItems[indexToRun] } { "—" };
 
         if(opsCallback.notNil) {
             opsCallback.value(indexToRun);
@@ -329,12 +332,13 @@ MagicDisplayGUI : MagicDisplay {
             ("[ops] No callback for index " ++ indexToRun).warn;
         };
 
-        opsIndexNext = (indexToRun + 1).clip(0, totalCount);
+        nextIndexComputed = (indexToRun + 1).clip(0, totalCount);
+        opsIndexNext = nextIndexComputed;
         this.updateOpsHighlight;
     }
 
     updateOpsHighlight {
-        var totalCount, entryStrings, nextIndexLocal;
+        var totalCount, entryStrings, nextIndexLocal, statusText;
         totalCount = opsItems.size;
         nextIndexLocal = opsIndexNext.min(totalCount);
 
@@ -344,20 +348,20 @@ MagicDisplayGUI : MagicDisplay {
             marker ++ item
         });
 
+        statusText = if(opsIndexNext < totalCount) {
+            "Next: " ++ opsItems[opsIndexNext]
+        }{
+            "Done."
+        };
+
         AppClock.sched(0, {
-            var statusText;
-            opsListView.items = entryStrings;
-            statusText = if(opsIndexNext < totalCount) {
-                "Next: " ++ opsItems[opsIndexNext]
-            }{
-                "Done."
-            };
-            opsStatusText.string = statusText;
+            opsListView.items_(entryStrings);
+            opsStatusText.string_(statusText);
             nil
         });
     }
 
-    // ─── Meter support ────────────────────────────────────────────
+    // ─── meters ───────────────────────────────────────────────────
     enableMeters { arg flag = true;
         var shouldEnable;
         shouldEnable = flag ? true;
@@ -365,7 +369,6 @@ MagicDisplayGUI : MagicDisplay {
 
         if(shouldEnable.not) { ^this };
 
-        // Ensure SynthDefs once
         Server.default.bind({
             var hasA, hasB;
             hasA = SynthDescLib.global.at(\busMeterA).notNil;
@@ -389,11 +392,9 @@ MagicDisplayGUI : MagicDisplay {
                 }).add;
             };
 
-            // Free old meter synths if any
             if(meterSynthA.notNil) { meterSynthA.free };
             if(meterSynthB.notNil) { meterSynthB.free };
 
-            // Attach to current chain buses
             {
                 var busA, busB;
                 busA = Ndef(\chainA).bus;
@@ -403,7 +404,6 @@ MagicDisplayGUI : MagicDisplay {
             }.value;
         });
 
-        // OSC update hooks
         if(oscA.notNil) { oscA.free };
         if(oscB.notNil) { oscB.free };
 
@@ -413,7 +413,9 @@ MagicDisplayGUI : MagicDisplay {
             rightAmp = msg[4];
             levelAvg = ((leftAmp + rightAmp) * 0.5).clip(0, 1);
             AppClock.sched(0, {
-                meterViewA.value = levelAvg;
+                var viewExists;
+                viewExists = meterViewA.notNil;
+                if(viewExists) { meterViewA.value_(levelAvg) };
                 nil
             });
         }, '/ampA');
@@ -424,18 +426,20 @@ MagicDisplayGUI : MagicDisplay {
             rightAmp = msg[4];
             levelAvg = ((leftAmp + rightAmp) * 0.5).clip(0, 1);
             AppClock.sched(0, {
-                meterViewB.value = levelAvg;
+                var viewExists;
+                viewExists = meterViewB.notNil;
+                if(viewExists) { meterViewB.value_(levelAvg) };
                 nil
             });
         }, '/ampB');
     }
 
-    // ─── Display hooks from MagicPedalboardNew ────────────────────
+    // ─── display hooks from MagicPedalboardNew ────────────────────
     showInit { arg pedalboard, versionString, current, next;
         var titleText;
         titleText = "MagicDisplayGUI – " ++ versionString;
         AppClock.sched(0, {
-            if(window.notNil) { window.name = titleText };
+            if(window.notNil) { window.name_(titleText) };
             nil
         });
     }
@@ -462,7 +466,7 @@ MagicDisplayGUI : MagicDisplay {
         var infoText;
         infoText = "[MPB:switch] " ++ oldSink ++ " → " ++ newSink;
         AppClock.sched(0, {
-            window.name = "MagicDisplayGUI – switched: " ++ oldSink ++ " → " ++ newSink;
+            if(window.notNil) { window.name_("MagicDisplayGUI – switched: " ++ oldSink ++ " → " ++ newSink) };
             this.highlightCurrentColumn;
             nil
         });
@@ -486,7 +490,7 @@ MagicDisplayGUI : MagicDisplay {
         AppClock.sched(0, { text.postln; nil });
     }
 
-    // Main detailed view updater
+    // main detailed view updater
     showChainsDetailed { arg current, next, bypassAKeys, bypassBKeys, effCurrent, effNext;
         var currentItems, nextItems, effCurrentText, effNextText;
         currentItems = this.formatListTopDown(current, bypassAKeys, effCurrent);
@@ -495,12 +499,12 @@ MagicDisplayGUI : MagicDisplay {
         effNextText    = "eff: " ++ effNext.join(" -> ");
 
         AppClock.sched(0, {
-            leftHeader.string  = "CURRENT (sink=" ++ current[0] ++ ")";
-            rightHeader.string = "NEXT (sink=" ++ next[0] ++ ")";
-            leftListView.items = currentItems;
-            rightListView.items = nextItems;
-            leftEffective.string  = effCurrentText;
-            rightEffective.string = effNextText;
+            if(leftHeader.notNil)  { leftHeader.string_("CURRENT (sink=" ++ current[0] ++ ")") };
+            if(rightHeader.notNil) { rightHeader.string_("NEXT (sink=" ++ next[0] ++ ")") };
+            if(leftListView.notNil)  { leftListView.items_(currentItems) };
+            if(rightListView.notNil) { rightListView.items_(nextItems) };
+            if(leftEffective.notNil)  { leftEffective.string_(effCurrentText) };
+            if(rightEffective.notNil) { rightEffective.string_(effNextText) };
             nil
         });
     }
