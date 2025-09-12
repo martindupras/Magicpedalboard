@@ -1,6 +1,7 @@
-/* MagicDisplay.sc  v0.1.0
+/* MagicDisplay.sc  v0.1.1
    Console display adaptor for MagicPedalboardNew.
    Prints structured messages now; later you can subclass with a real GUI.
+   // MD 20250912-1345
 */
 
 MagicDisplay : Object {
@@ -10,7 +11,7 @@ MagicDisplay : Object {
     var < logLevel;  // 0 = silent, 1 = normal, 2 = verbose
 
     *initClass {
-        version = "v0.1.0";
+        version = "v0.1.1";
         ("MagicDisplay " ++ version).postln;
     }
 
@@ -35,6 +36,7 @@ MagicDisplay : Object {
         ++ "  showMutation(action, args, nextChain)\n"
         ++ "  showBypass(which, key, state, chain, bypassKeys)\n"
         ++ "  showReset(current, next), showChains(current, next, bypassA, bypassB)\n"
+        ++ "  showChainsDetailed(current, next, bypassA, bypassB, effCurrent, effNext)\n"
         ++ "  showError(message)\n";
         text.postln;
     }
@@ -83,6 +85,47 @@ MagicDisplay : Object {
             ("A: " ++ current ++ "   bypassA: " ++ bypassAKeys).postln;
             ("B: " ++ next    ++ "   bypassB: " ++ bypassBKeys).postln;
         };
+    }
+
+    showChainsDetailed { |current, next, bypassAKeys, bypassBKeys, effCurrent, effNext|
+        var header, formatOne;
+
+        if(logLevel <= 0) { ^this };
+
+        header = { |titleString| ("==== " ++ titleString ++ " ====").postln };
+
+        formatOne = { |titleString, listRef, bypassKeys, effective|
+            var sinkKey, sourceKey, lastIndex, indexCounter, lineText;
+
+            lastIndex = listRef.size - 1;
+            sinkKey = listRef[0];
+            sourceKey = listRef[lastIndex];
+
+            header.(titleString);
+            ("sink : " ++ sinkKey).postln;
+
+            indexCounter = 1;
+            if(listRef.size > 2) {
+                "procs:".postln;
+                listRef.copyRange(1, lastIndex - 1).do { |procKey|
+                    var isBypassed, mark;
+                    isBypassed = bypassKeys.includes(procKey);
+                    mark = if(isBypassed) { "BYP" } { "ON " };
+                    lineText = ("  [" ++ indexCounter ++ "] " ++ procKey ++ "  (" ++ mark ++ ")");
+                    lineText.postln;
+                    indexCounter = indexCounter + 1;
+                };
+            }{
+                "procs: (none)".postln;
+            };
+
+            ("src  : " ++ sourceKey).postln;
+            ("eff  : " ++ effective.join("  ->  ")).postln;
+            "".postln;
+        };
+
+        formatOne.("CURRENT", current, bypassAKeys, effCurrent);
+        formatOne.("NEXT",    next,    bypassBKeys, effNext);
     }
 
     showError { |message|
