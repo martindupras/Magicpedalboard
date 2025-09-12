@@ -1,4 +1,4 @@
-/* MagicPedalboardNew.sc v0.3.6
+/* MagicPedalboardNew.sc v0.3.8
  A/B pedalboard chain manager built on Ndefs.
 
  - Chains are Arrays of Symbols ordered [sink, …, source].
@@ -7,7 +7,7 @@
  - Most mutators act on the next chain; explicit current-chain bypass helpers are provided.
  - Optional display adaptor (MagicDisplay / MagicDisplayGUI) receives notifications, including detailed chain views.
  - Non-destructive rebuilds (no server resets during rebuild). Only .reset performs a safe server-tree reset.
- // MD 20250912-1808
+ // MD 20250912-1838
 */
 MagicPedalboardNew : Object {
 
@@ -31,7 +31,7 @@ MagicPedalboardNew : Object {
 
     *initClass {
         var text;
-        version = "v0.3.6";
+        version = "v0.3.8";
         text = "MagicPedalboardNew " ++ version;
         text.postln;
     }
@@ -44,7 +44,6 @@ MagicPedalboardNew : Object {
 
     init { arg disp;
         var sinkFunc;
-        var initialChain;
         display = disp;
         defaultNumChannels = 2;
         defaultSource = \ts0;
@@ -150,7 +149,6 @@ MagicPedalboardNew : Object {
 
                 if(listRef.size > 2) {
                     "procs:".postln;
-                    // printers show processors in order nearest sink last
                     processorsList = listRef.copyRange(1, lastIndex - 1);
                     indexCounter = 1;
                     processorsList.do({ arg procKey;
@@ -175,8 +173,7 @@ MagicPedalboardNew : Object {
     }
 
     playCurrent {
-        var sinkKey;
-        var canRun;
+        var sinkKey, canRun;
         sinkKey = currentChain[0];
         canRun = this.ensureServerTree;
         if(canRun.not) { ^this };
@@ -190,8 +187,7 @@ MagicPedalboardNew : Object {
     }
 
     stopCurrent {
-        var sinkKey;
-        var canRun;
+        var sinkKey, canRun;
         sinkKey = currentChain[0];
         canRun = this.ensureServerTree;
         if(canRun.not) { ^this };
@@ -391,16 +387,18 @@ MagicPedalboardNew : Object {
         currentChain = chainAList;
         nextChain = chainBList;
 
-        // SAFE server reset ONLY here
-        Server.default.bind({
-            s.initTree;
-            s.defaultGroup.freeAll;
+        // SAFE server reset ONLY here, using Server.default.* (not 's')
+        Server.default.waitForBoot({
+            Server.default.bind({
+                Server.default.initTree;
+                Server.default.defaultGroup.freeAll;
 
-            this.rebuildUnbound(nextChain);
-            this.rebuildUnbound(currentChain);
+                this.rebuildUnbound(nextChain);
+                this.rebuildUnbound(currentChain);
 
-            Ndef(sinkBKey).stop;
-            Ndef(sinkAKey).play(numChannels: defaultNumChannels);
+                Ndef(sinkBKey).stop;
+                Ndef(sinkAKey).play(numChannels: defaultNumChannels);
+            });
         });
 
         if(display.notNil) { display.showReset(currentChain, nextChain) };
@@ -446,8 +444,7 @@ MagicPedalboardNew : Object {
     }
 
     effectiveListForInternal { arg listRef;
-        var dict, resultList, lastIndex;
-        var isProcessor, isBypassed;
+        var dict, resultList, lastIndex, isProcessor, isBypassed;
         dict = this.bypassDictForListInternal(listRef);
         resultList = Array.new;
         lastIndex = listRef.size - 1;
