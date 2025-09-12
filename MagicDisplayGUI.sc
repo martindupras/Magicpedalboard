@@ -1,14 +1,9 @@
-/* MagicDisplayGUI.sc v0.2.2
- GUI display adaptor for MagicPedalboardNew.
-
- - CURRENT column highlighted in green.
- - Top-down chain: source (top) → processors → sink (bottom).
- - "What you should hear" + visual countdown (numeric + bar).
- - Operations panel: upcoming ops list, highlights NEXT; "Next" button triggers 3s countdown then runs.
- - Embedded level meters for \chainA and \chainB.
- - No server.sync; all server ops inside Server.default.bind.
- - UI-ready queue prevents touching nil views before window exists.
- // MD 20250912-1715
+/* MagicDisplayGUI.sc v0.2.3
+ CURRENT column highlighted in green; top-down list (src → procs → sink);
+ expectation text + visual countdown; operations list with 3s pre-roll;
+ embedded meters (A/B). UI-ready queue prevents touching nil views.
+ No server.sync; server ops inside Server.default.bind.
+ // MD 20250912-1738
 */
 MagicDisplayGUI : MagicDisplay {
     classvar <versionGUI;
@@ -40,7 +35,7 @@ MagicDisplayGUI : MagicDisplay {
 
     *initClass {
         var text;
-        versionGUI = "v0.2.2";
+        versionGUI = "v0.2.3";
         text = "MagicDisplayGUI " ++ versionGUI;
         text.postln;
     }
@@ -51,9 +46,6 @@ MagicDisplayGUI : MagicDisplay {
         ^instance.initGui;
     }
 
-    // ─────────────────────────────────────────────────────────
-    // lifecycle
-    // ─────────────────────────────────────────────────────────
     initGui {
         var windowRect, panelWidth, listHeight, headerHeight, footerHeight, pad;
         var opsWidth, opsRect;
@@ -108,7 +100,7 @@ MagicDisplayGUI : MagicDisplay {
                 effectiveLabel.align_(\center);
 
                 resultDict = (panel: panel, header: header, list: listView, eff: effectiveLabel);
-                resultDict  // DO NOT use ^ here
+                resultDict
             };
 
             buildMeters = {
@@ -121,12 +113,10 @@ MagicDisplayGUI : MagicDisplay {
                 metersGroup = CompositeView(window, Rect(pad, windowRect.height - metersHeight - pad, windowRect.width - 2 * pad, metersHeight));
                 metersGroup.background_(Color(0.96, 0.96, 0.96));
 
-                // Chain A
                 row1 = CompositeView(metersGroup, Rect(0, 0, metersGroup.bounds.width, rowHeight));
                 labelA = StaticText(row1, Rect(0, 4, labelWidth, 20)).string_("chainA");
                 meterViewA = LevelIndicator(row1, Rect(labelWidth + 6, 4, barWidth, 20));
 
-                // Chain B
                 row2 = CompositeView(metersGroup, Rect(0, rowHeight + 8, metersGroup.bounds.width, rowHeight));
                 labelB = StaticText(row2, Rect(0, 4, labelWidth, 20)).string_("chainB");
                 meterViewB = LevelIndicator(row2, Rect(labelWidth + 6, 4, barWidth, 20));
@@ -136,8 +126,8 @@ MagicDisplayGUI : MagicDisplay {
                 var currentBg, nextBg;
                 currentBg = greenBg;
                 nextBg = neutralBg;
-                if(leftPanel.notNil) { leftPanel[\panel].background_(currentBg) };
-                if(rightPanel.notNil) { rightPanel[\panel].background_(nextBg) };
+                if(leftPanel.notNil) { leftPanel.background_(currentBg) };
+                if(rightPanel.notNil) { rightPanel.background_(nextBg) };
             };
 
             window = Window("MagicDisplayGUI – CURRENT / NEXT", windowRect).front.alwaysOnTop_(true);
@@ -154,7 +144,6 @@ MagicDisplayGUI : MagicDisplay {
             rightListView   = columnRightDict[\list];
             rightEffective  = columnRightDict[\eff];
 
-            // expectation + countdown controls
             expectationText = TextView(window, Rect(pad, leftPanel.bounds.bottom + 6, 2 * panelWidth + 40, 52));
             expectationText.background_(Color(1, 1, 0.9));
             expectationText.string_("What you should hear will appear here…");
@@ -176,7 +165,6 @@ MagicDisplayGUI : MagicDisplay {
             });
             countdownBarView.setProperty(\progress, 0.0);
 
-            // operations
             opsItems = Array.new;
             opsIndexNext = 0;
             opsCallback = nil;
@@ -201,7 +189,6 @@ MagicDisplayGUI : MagicDisplay {
             buildMeters.value;
             applyInitialHighlight.value;
 
-            // mark UI ready and flush pending UI actions
             uiReadyFlag = true;
             this.flushUiPendingActions;
         };
@@ -217,9 +204,7 @@ MagicDisplayGUI : MagicDisplay {
         ^this
     }
 
-    // ─────────────────────────────────────────────────────────
     // ui-ready helpers
-    // ─────────────────────────────────────────────────────────
     queueUi { arg func;
         var fn;
         fn = func;
@@ -239,9 +224,7 @@ MagicDisplayGUI : MagicDisplay {
         });
     }
 
-    // ─────────────────────────────────────────────────────────
     // visuals
-    // ─────────────────────────────────────────────────────────
     highlightCurrentColumn {
         var greenBg, neutralBg;
         greenBg = Color(0.85, 1.0, 0.85);
@@ -263,7 +246,7 @@ MagicDisplayGUI : MagicDisplay {
 
         if(listRef.size > 2) {
             itemsOut = itemsOut.add("procs:");
-            processorsList = listRef.copyRange(1, lastIndex - 1).reverse; // visual: src → sink
+            processorsList = listRef.copyRange(1, lastIndex - 1).reverse;
             indexCounter = 1;
             processorsList.do({ arg procKey;
                 isBypassed = bypassKeys.includes(procKey);
@@ -281,9 +264,7 @@ MagicDisplayGUI : MagicDisplay {
         ^itemsOut
     }
 
-    // ─────────────────────────────────────────────────────────
     // expectation + countdown
-    // ─────────────────────────────────────────────────────────
     showExpectation { arg textString, seconds = 0;
         var secondsLocal, hasCountdown;
         secondsLocal = seconds ? 0;
@@ -354,9 +335,7 @@ MagicDisplayGUI : MagicDisplay {
         });
     }
 
-    // ─────────────────────────────────────────────────────────
     // operations
-    // ─────────────────────────────────────────────────────────
     setOperations { arg itemsArray;
         var itemsSafe, entryStrings;
         itemsSafe = itemsArray ? Array.new;
@@ -414,9 +393,7 @@ MagicDisplayGUI : MagicDisplay {
         });
     }
 
-    // ─────────────────────────────────────────────────────────
     // meters
-    // ─────────────────────────────────────────────────────────
     enableMeters { arg flag = true;
         var shouldEnable;
         shouldEnable = flag ? true;
@@ -486,9 +463,7 @@ MagicDisplayGUI : MagicDisplay {
         }, '/ampB');
     }
 
-    // ─────────────────────────────────────────────────────────
-    // display hooks from MagicPedalboardNew
-    // ─────────────────────────────────────────────────────────
+    // display hooks
     showInit { arg pedalboard, versionString, current, next;
         var titleText;
         titleText = "MagicDisplayGUI – " ++ versionString;
