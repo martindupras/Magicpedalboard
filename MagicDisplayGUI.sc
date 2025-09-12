@@ -1,15 +1,18 @@
-/* MagicDisplayGUI.sc v0.2.1
+/* MagicDisplayGUI.sc v0.2.2
  GUI display adaptor for MagicPedalboardNew.
 
  - CURRENT column highlighted in green.
  - Top-down chain: source (top) → processors → sink (bottom).
- - "What you should hear" text field + visual countdown (numeric + bar).
+ - "What you should hear" + visual countdown (numeric + bar).
  - Operations panel: upcoming ops list, highlights NEXT; "Next" button triggers 3s countdown then runs.
- - Embedded level meters for \chainA and \chainB (no server.sync; Server.default.bind only).
- // MD 20250912-1640
+ - Embedded level meters for \chainA and \chainB.
+ - No server.sync; all server ops inside Server.default.bind.
+ - UI-ready queue prevents touching nil views before window exists.
+ // MD 20250912-1715
 */
 MagicDisplayGUI : MagicDisplay {
     classvar <versionGUI;
+
     var <window;
 
     // layout elements
@@ -31,9 +34,13 @@ MagicDisplayGUI : MagicDisplay {
     var meterSynthA, meterSynthB, oscA, oscB;
     var enableMetersFlag;
 
+    // ui-ready machinery
+    var uiReadyFlag;
+    var uiPendingActions;
+
     *initClass {
         var text;
-        versionGUI = "v0.2.1";
+        versionGUI = "v0.2.2";
         text = "MagicDisplayGUI " ++ versionGUI;
         text.postln;
     }
@@ -44,10 +51,12 @@ MagicDisplayGUI : MagicDisplay {
         ^instance.initGui;
     }
 
+    // ─────────────────────────────────────────────────────────
+    // lifecycle
+    // ─────────────────────────────────────────────────────────
     initGui {
         var windowRect, panelWidth, listHeight, headerHeight, footerHeight, pad;
         var opsWidth, opsRect;
-        var selfRef;
         var buildWindow;
 
         windowRect = Rect(100, 100, 980, 520);
@@ -64,12 +73,14 @@ MagicDisplayGUI : MagicDisplay {
         opsCountdownSeconds = 3.0;
         enableMetersFlag = true;
 
-        selfRef = this;
+        uiReadyFlag = false;
+        uiPendingActions = Array.new;
 
         buildWindow = {
             var metersHeight, greenBg, neutralBg;
             var buildColumn, buildMeters, applyInitialHighlight;
             var columnLeftX, columnRightX;
+            var columnLeftDict, columnRightDict;
 
             metersHeight = 86;
             greenBg = Color(0.85, 1.0, 0.85);
@@ -80,7 +91,7 @@ MagicDisplayGUI : MagicDisplay {
 
             buildColumn = { arg xPos, title;
                 var panel, header, listView, effectiveLabel;
-                var headerRect, listRect, effRect;
+                var headerRect, listRect, effRect, resultDict;
 
                 panel = CompositeView(window, Rect(xPos, pad, panelWidth, windowRect.height - 2 * pad - metersHeight));
                 panel.background_(neutralBg);
@@ -96,7 +107,8 @@ MagicDisplayGUI : MagicDisplay {
                 effectiveLabel = StaticText(panel, effRect).string_("eff: —");
                 effectiveLabel.align_(\center);
 
-                ^(panel: panel, header: header, list: listView, eff: effectiveLabel)
+                resultDict = (panel: panel, header: header, list: listView, eff: effectiveLabel);
+                resultDict  // DO NOT use ^ here
             };
 
             buildMeters = {
@@ -130,10 +142,20 @@ MagicDisplayGUI : MagicDisplay {
 
             window = Window("MagicDisplayGUI – CURRENT / NEXT", windowRect).front.alwaysOnTop_(true);
 
-            leftPanel = buildColumn.value(columnLeftX, "CURRENT");
-            rightPanel = buildColumn.value(columnRightX, "NEXT");
+            columnLeftDict = buildColumn.value(columnLeftX, "CURRENT");
+            leftPanel      = columnLeftDict[\panel];
+            leftHeader     = columnLeftDict[\header];
+            leftListView   = columnLeftDict[\list];
+            leftEffective  = columnLeftDict[\eff];
 
-            expectationText = TextView(window, Rect(pad, leftPanel[\panel].bounds.bottom + 6, 2 * panelWidth + 40, 52));
+            columnRightDict = buildColumn.value(columnRightX, "NEXT");
+            rightPanel      = columnRightDict[\panel];
+            rightHeader     = columnRightDict[\header];
+            rightListView   = columnRightDict[\list];
+            rightEffective  = columnRightDict[\eff];
+
+            // expectation + countdown controls
+            expectationText = TextView(window, Rect(pad, leftPanel.bounds.bottom + 6, 2 * panelWidth + 40, 52));
             expectationText.background_(Color(1, 1, 0.9));
             expectationText.string_("What you should hear will appear here…");
 
@@ -154,7 +176,7 @@ MagicDisplayGUI : MagicDisplay {
             });
             countdownBarView.setProperty(\progress, 0.0);
 
-            // Operations list + button
+            // operations
             opsItems = Array.new;
             opsIndexNext = 0;
             opsCallback = nil;
@@ -169,15 +191,19 @@ MagicDisplayGUI : MagicDisplay {
                     totalCountLocal = opsItems.size;
                     if(nextIndexLocal >= totalCountLocal) { "No more operations.".postln; ^nil };
                     nextLabel = opsItems[nextIndexLocal];
-                    selfRef.startCountdown(opsCountdownSeconds, "Next: " ++ nextLabel, {
+                    this.startCountdown(opsCountdownSeconds, "Next: " ++ nextLabel, {
                         var clampedIndex;
                         clampedIndex = opsIndexNext.clip(0, opsItems.size - 1);
-                        selfRef.runNextOperation(clampedIndex);
+                        this.runNextOperation(clampedIndex);
                     });
                 });
 
             buildMeters.value;
             applyInitialHighlight.value;
+
+            // mark UI ready and flush pending UI actions
+            uiReadyFlag = true;
+            this.flushUiPendingActions;
         };
 
         AppClock.sched(0, {
@@ -191,16 +217,41 @@ MagicDisplayGUI : MagicDisplay {
         ^this
     }
 
-    // ─── highlight CURRENT column ─────────────────────────────────
+    // ─────────────────────────────────────────────────────────
+    // ui-ready helpers
+    // ─────────────────────────────────────────────────────────
+    queueUi { arg func;
+        var fn;
+        fn = func;
+        if(uiReadyFlag) {
+            AppClock.sched(0, { fn.value; nil });
+        }{
+            uiPendingActions = uiPendingActions.add(fn);
+        };
+    }
+
+    flushUiPendingActions {
+        var actionsToRun;
+        actionsToRun = uiPendingActions;
+        uiPendingActions = Array.new;
+        actionsToRun.do({ arg f;
+            AppClock.sched(0, { f.value; nil });
+        });
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // visuals
+    // ─────────────────────────────────────────────────────────
     highlightCurrentColumn {
         var greenBg, neutralBg;
         greenBg = Color(0.85, 1.0, 0.85);
         neutralBg = Color(0.92, 0.92, 0.92);
-        if(leftPanel.notNil) { leftPanel[\panel].background_(greenBg) };
-        if(rightPanel.notNil) { rightPanel[\panel].background_(neutralBg) };
+        this.queueUi({
+            if(leftPanel.notNil) { leftPanel.background_(greenBg) };
+            if(rightPanel.notNil) { rightPanel.background_(neutralBg) };
+        });
     }
 
-    // ─── format src → procs → sink ────────────────────────────────
     formatListTopDown { arg listRef, bypassKeys, effectiveList;
         var itemsOut, lastIndex, processorsList, indexCounter, sourceKey, sinkKey, isBypassed, badge, lineText;
         itemsOut = Array.new;
@@ -212,7 +263,7 @@ MagicDisplayGUI : MagicDisplay {
 
         if(listRef.size > 2) {
             itemsOut = itemsOut.add("procs:");
-            processorsList = listRef.copyRange(1, lastIndex - 1).reverse; // top→down from src to sink
+            processorsList = listRef.copyRange(1, lastIndex - 1).reverse; // visual: src → sink
             indexCounter = 1;
             processorsList.do({ arg procKey;
                 isBypassed = bypassKeys.includes(procKey);
@@ -230,43 +281,46 @@ MagicDisplayGUI : MagicDisplay {
         ^itemsOut
     }
 
-    // ─── expectation + countdown ──────────────────────────────────
+    // ─────────────────────────────────────────────────────────
+    // expectation + countdown
+    // ─────────────────────────────────────────────────────────
     showExpectation { arg textString, seconds = 0;
         var secondsLocal, hasCountdown;
         secondsLocal = seconds ? 0;
         hasCountdown = secondsLocal > 0;
 
-        AppClock.sched(0, {
+        this.queueUi({
             var labelNow;
-            expectationText.string_(textString.asString);
+            if(expectationText.notNil) { expectationText.string_(textString.asString) };
             if(hasCountdown) {
                 this.startCountdown(secondsLocal, "Listen in…", { nil });
             }{
                 labelNow = "Ready";
-                countdownLabel.string_(labelNow);
-                countdownBarView.setProperty(\progress, 0.0);
-                countdownBarView.refresh;
+                if(countdownLabel.notNil) { countdownLabel.string_(labelNow) };
+                if(countdownBarView.notNil) {
+                    countdownBarView.setProperty(\progress, 0.0);
+                    countdownBarView.refresh;
+                };
             };
-            nil
         });
     }
 
     startCountdown { arg seconds, labelText, onFinishedFunc;
-        var secondsClamped, startTime, stopTime, selfRef;
+        var secondsClamped, startTime, stopTime;
         secondsClamped = seconds.clip(0.5, 10.0);
         startTime = Main.elapsedTime;
         stopTime = startTime + secondsClamped;
-        selfRef = this;
 
         if(countdownTask.notNil) { countdownTask.stop; countdownTask = nil };
 
-        AppClock.sched(0, {
-            var finishedFlag, delaySeconds;
-            var updateAndCheckDone;
+        this.queueUi({
+            var finishedFlag, delaySeconds, updateAndCheckDone;
 
-            countdownLabel.string_(labelText.asString ++ " (" ++ secondsClamped.asString ++ "s)");
-            countdownBarView.setProperty(\progress, 0.0);
-            countdownBarView.refresh;
+            if(countdownLabel.notNil) { countdownLabel.string_(labelText.asString ++ " (" ++ secondsClamped.asString ++ "s)") };
+            if(countdownBarView.notNil) {
+                countdownBarView.setProperty(\progress, 0.0);
+                countdownBarView.refresh;
+            };
 
             finishedFlag = false;
             delaySeconds = 0.05;
@@ -277,9 +331,11 @@ MagicDisplayGUI : MagicDisplay {
                 remainingSeconds = (stopTime - nowTime).max(0);
                 progressFraction = ((secondsClamped - remainingSeconds) / secondsClamped).clip(0.0, 1.0);
 
-                countdownLabel.string_(labelText.asString ++ " (" ++ remainingSeconds.round(0.1).asString ++ "s)");
-                countdownBarView.setProperty(\progress, progressFraction);
-                countdownBarView.refresh;
+                if(countdownLabel.notNil) { countdownLabel.string_(labelText.asString ++ " (" ++ remainingSeconds.round(0.1).asString ++ "s)") };
+                if(countdownBarView.notNil) {
+                    countdownBarView.setProperty(\progress, progressFraction);
+                    countdownBarView.refresh;
+                };
 
                 if(remainingSeconds <= 0) { finishedFlag = true };
             };
@@ -292,26 +348,25 @@ MagicDisplayGUI : MagicDisplay {
                     localFinished = finishedFlag;
                     delaySeconds.wait;
                 });
-                countdownLabel.string_("Now");
+                if(countdownLabel.notNil) { countdownLabel.string_("Now") };
                 if(onFinishedFunc.notNil) { onFinishedFunc.value };
             }, AppClock).play;
-
-            nil
         });
     }
 
-    // ─── operations panel ─────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────
+    // operations
+    // ─────────────────────────────────────────────────────────
     setOperations { arg itemsArray;
         var itemsSafe, entryStrings;
         itemsSafe = itemsArray ? Array.new;
-        entryStrings = itemsSafe;
+        entryStrings = itemsSafe.collect({ arg it; it.asString });
 
-        AppClock.sched(0, {
-            opsItems = entryStrings.collect({ arg it; it.asString });
-            opsListView.items_(opsItems);
+        this.queueUi({
+            opsItems = entryStrings;
+            if(opsListView.notNil) { opsListView.items_(opsItems) };
             opsIndexNext = 0;
             this.updateOpsHighlight;
-            nil
         });
     }
 
@@ -322,9 +377,8 @@ MagicDisplayGUI : MagicDisplay {
     }
 
     runNextOperation { arg indexToRun;
-        var totalCount, labelText, nextIndexComputed;
+        var totalCount, nextIndexComputed;
         totalCount = opsItems.size;
-        labelText = if(indexToRun < totalCount) { opsItems[indexToRun] } { "—" };
 
         if(opsCallback.notNil) {
             opsCallback.value(indexToRun);
@@ -354,14 +408,15 @@ MagicDisplayGUI : MagicDisplay {
             "Done."
         };
 
-        AppClock.sched(0, {
-            opsListView.items_(entryStrings);
-            opsStatusText.string_(statusText);
-            nil
+        this.queueUi({
+            if(opsListView.notNil) { opsListView.items_(entryStrings) };
+            if(opsStatusText.notNil) { opsStatusText.string_(statusText) };
         });
     }
 
-    // ─── meters ───────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────
+    // meters
+    // ─────────────────────────────────────────────────────────
     enableMeters { arg flag = true;
         var shouldEnable;
         shouldEnable = flag ? true;
@@ -370,7 +425,7 @@ MagicDisplayGUI : MagicDisplay {
         if(shouldEnable.not) { ^this };
 
         Server.default.bind({
-            var hasA, hasB;
+            var hasA, hasB, busA, busB;
             hasA = SynthDescLib.global.at(\busMeterA).notNil;
             hasB = SynthDescLib.global.at(\busMeterB).notNil;
 
@@ -395,13 +450,10 @@ MagicDisplayGUI : MagicDisplay {
             if(meterSynthA.notNil) { meterSynthA.free };
             if(meterSynthB.notNil) { meterSynthB.free };
 
-            {
-                var busA, busB;
-                busA = Ndef(\chainA).bus;
-                busB = Ndef(\chainB).bus;
-                meterSynthA = Synth(\busMeterA, [\inBus, busA.index, \rate, 24], target: Server.default.defaultGroup, addAction: \addToTail);
-                meterSynthB = Synth(\busMeterB, [\inBus, busB.index, \rate, 24], target: Server.default.defaultGroup, addAction: \addToTail);
-            }.value;
+            busA = Ndef(\chainA).bus;
+            busB = Ndef(\chainB).bus;
+            meterSynthA = Synth(\busMeterA, [\inBus, busA.index, \rate, 24], target: Server.default.defaultGroup, addAction: \addToTail);
+            meterSynthB = Synth(\busMeterB, [\inBus, busB.index, \rate, 24], target: Server.default.defaultGroup, addAction: \addToTail);
         });
 
         if(oscA.notNil) { oscA.free };
@@ -434,13 +486,14 @@ MagicDisplayGUI : MagicDisplay {
         }, '/ampB');
     }
 
-    // ─── display hooks from MagicPedalboardNew ────────────────────
+    // ─────────────────────────────────────────────────────────
+    // display hooks from MagicPedalboardNew
+    // ─────────────────────────────────────────────────────────
     showInit { arg pedalboard, versionString, current, next;
         var titleText;
         titleText = "MagicDisplayGUI – " ++ versionString;
-        AppClock.sched(0, {
+        this.queueUi({
             if(window.notNil) { window.name_(titleText) };
-            nil
         });
     }
 
@@ -465,10 +518,9 @@ MagicDisplayGUI : MagicDisplay {
     showSwitch { arg oldSink, newSink, current, next;
         var infoText;
         infoText = "[MPB:switch] " ++ oldSink ++ " → " ++ newSink;
-        AppClock.sched(0, {
+        this.queueUi({
             if(window.notNil) { window.name_("MagicDisplayGUI – switched: " ++ oldSink ++ " → " ++ newSink) };
             this.highlightCurrentColumn;
-            nil
         });
     }
 
@@ -490,7 +542,6 @@ MagicDisplayGUI : MagicDisplay {
         AppClock.sched(0, { text.postln; nil });
     }
 
-    // main detailed view updater
     showChainsDetailed { arg current, next, bypassAKeys, bypassBKeys, effCurrent, effNext;
         var currentItems, nextItems, effCurrentText, effNextText;
         currentItems = this.formatListTopDown(current, bypassAKeys, effCurrent);
@@ -498,14 +549,13 @@ MagicDisplayGUI : MagicDisplay {
         effCurrentText = "eff: " ++ effCurrent.join(" -> ");
         effNextText    = "eff: " ++ effNext.join(" -> ");
 
-        AppClock.sched(0, {
+        this.queueUi({
             if(leftHeader.notNil)  { leftHeader.string_("CURRENT (sink=" ++ current[0] ++ ")") };
             if(rightHeader.notNil) { rightHeader.string_("NEXT (sink=" ++ next[0] ++ ")") };
             if(leftListView.notNil)  { leftListView.items_(currentItems) };
             if(rightListView.notNil) { rightListView.items_(nextItems) };
             if(leftEffective.notNil)  { leftEffective.string_(effCurrentText) };
             if(rightEffective.notNil) { rightEffective.string_(effNextText) };
-            nil
         });
     }
 
