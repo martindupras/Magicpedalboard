@@ -1,4 +1,4 @@
-/*  MagicPedalboardNew.sc  v0.1.4
+/*  MagicPedalboardNew.sc  v0.1.5
     A/B pedalboard chain manager built on Ndefs.
     - Chains are Arrays of Symbols ordered [sink, …, source].
     - Uses JITLib embedding: Ndef(left) <<> Ndef(right).
@@ -11,14 +11,13 @@ MagicPedalboardNew : Object {
     // ───────────────────────────────────────────────────────────────
     // class metadata
     // ───────────────────────────────────────────────────────────────
-    classvar < version;
+    classvar < version = "v0.1.5";
 
     // ───────────────────────────────────────────────────────────────
     // instance state
     // ───────────────────────────────────────────────────────────────
     var < currentChain;   // points to either chainAList or chainBList
     var < nextChain;      // points to the other list
-
     var chainAList;       // [\chainA, ...processors..., source]
     var chainBList;       // [\chainB, ...processors..., source]
 
@@ -32,7 +31,6 @@ MagicPedalboardNew : Object {
     // class init
     // ───────────────────────────────────────────────────────────────
     *initClass {
-        version = "v0.1.4";
         ("MagicPedalboardNew " ++ version).postln;
     }
 
@@ -100,8 +98,8 @@ MagicPedalboardNew : Object {
 
     printChains {
         var annotateCurrent, annotateNext;
-        annotateCurrent = { |listRef| if(listRef.isIdentical(currentChain)) { "  (current)" } { "" } };
-        annotateNext = { |listRef| if(listRef.isIdentical(nextChain)) { "  (next)" } { "" } };
+        annotateCurrent = { |listRef| if(listRef === currentChain) { "  (current)" } { "" } };
+        annotateNext = { |listRef| if(listRef === nextChain) { "  (next)" } { "" } };
 
         "MagicPedalboardNew.printChains:".postln;
 
@@ -253,21 +251,10 @@ MagicPedalboardNew : Object {
 
     // ---- diagnostics helpers -------------------------------------------------
 
-    effectiveCurrent {
-        ^this.effectiveListForInternal(currentChain)
-    }
-
-    effectiveNext {
-        ^this.effectiveListForInternal(nextChain)
-    }
-
-    bypassKeysCurrent {
-        ^this.bypassKeysForListInternal(currentChain)
-    }
-
-    bypassKeysNext {
-        ^this.bypassKeysForListInternal(nextChain)
-    }
+    effectiveCurrent { ^this.effectiveListForInternal(currentChain) }
+    effectiveNext    { ^this.effectiveListForInternal(nextChain) }
+    bypassKeysCurrent { ^this.bypassKeysForListInternal(currentChain) }
+    bypassKeysNext    { ^this.bypassKeysForListInternal(nextChain) }
 
     reset {
         var sinkAKey, sinkBKey;
@@ -295,24 +282,19 @@ MagicPedalboardNew : Object {
     // ───────────────────────────────────────────────────────────────
 
     setNextListInternal { | newList |
-        if(nextChain.isIdentical(chainAList)) {
-            chainAList = newList; nextChain = chainAList;
-        }{
-            chainBList = newList; nextChain = chainBList;
-        }
+        if(nextChain === chainAList) { chainAList = newList; nextChain = chainAList; }
+        { chainBList = newList; nextChain = chainBList; }
     }
 
     bypassDictForListInternal { | listRef |
-        ^if(listRef.isIdentical(chainAList)) { bypassA } { bypassB }
+        ^if(listRef === chainAList) { bypassA } { bypassB }
     }
 
     bypassKeysForListInternal { | listRef |
         var dict, keysBypassed;
         dict = this.bypassDictForListInternal(listRef);
         keysBypassed = Array.new;
-        dict.keysValuesDo { |key, state|
-            if(state == true) { keysBypassed = keysBypassed.add(key) };
-        };
+        dict.keysValuesDo { |key, state| if(state == true) { keysBypassed = keysBypassed.add(key) } };
         ^keysBypassed
     }
 
@@ -335,13 +317,10 @@ MagicPedalboardNew : Object {
             var isProcessor, isBypassed;
             isProcessor = (index > 0) and: (index < lastIndex);
             isBypassed = isProcessor and: { dict[key] == true };
-
             if((index == 0) or: { index == lastIndex }) {
                 resultList = resultList.add(key);            // keep sink & source
             }{
-                if(isBypassed.not) {
-                    resultList = resultList.add(key);        // keep only non-bypassed processors
-                };
+                if(isBypassed.not) { resultList = resultList.add(key) };
             };
         };
 
@@ -354,7 +333,6 @@ MagicPedalboardNew : Object {
         if(listRef.size < 2) { ^this };
 
         effective = this.effectiveListForInternal(listRef);
-
         effective.do { |key| this.ensureStereoInternal(key) };
 
         index = 0;
@@ -366,11 +344,7 @@ MagicPedalboardNew : Object {
         };
 
         sinkKey = effective[0];
-
-        if(listRef.isIdentical(currentChain)) {
-            Ndef(sinkKey).play(numChannels: defaultNumChannels);
-        }{
-            Ndef(sinkKey).stop;
-        };
+        if(listRef === currentChain) { Ndef(sinkKey).play(numChannels: defaultNumChannels) }
+        { Ndef(sinkKey).stop };
     }
 }
