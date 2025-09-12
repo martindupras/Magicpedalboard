@@ -1,4 +1,4 @@
-/* MagicDisplay.sc  v0.1.1
+/* MagicDisplay.sc  v0.1.2
    Console display adaptor for MagicPedalboardNew.
    Prints structured messages now; later you can subclass with a real GUI.
    // MD 20250912-1345
@@ -11,7 +11,7 @@ MagicDisplay : Object {
     var < logLevel;  // 0 = silent, 1 = normal, 2 = verbose
 
     *initClass {
-        version = "v0.1.1";
+        version = "v0.1.2";
         ("MagicDisplay " ++ version).postln;
     }
 
