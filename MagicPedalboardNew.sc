@@ -11,7 +11,7 @@ MagicPedalboardNew : Object {
 	// ───────────────────────────────────────────────────────────────
 	// class metadata
 	// ───────────────────────────────────────────────────────────────
-	classvar < version = "v0.3";
+	classvar < version = "v0.3.1";
 
 	// ───────────────────────────────────────────────────────────────
 	// instance state
@@ -27,6 +27,10 @@ MagicPedalboardNew : Object {
 	var defaultNumChannels;
 	var defaultSource;
 
+	var bypassAKeys, bypassBKeys;
+
+	var < display; // will hold a MagicDisplay
+
 	// ───────────────────────────────────────────────────────────────
 	// class init
 	// ───────────────────────────────────────────────────────────────
@@ -35,14 +39,15 @@ MagicPedalboardNew : Object {
 	}
 
 	*new {
-		^super.new.init
+		|disp = nil|  ^super.new.init(disp)  // optional display
 	}
 
 	// ───────────────────────────────────────────────────────────────
 	// init & sinks
 	// ───────────────────────────────────────────────────────────────
-	init {
+	init { |disp|
 		var sinkFunc;
+		display = disp;
 
 		defaultNumChannels = 2;
 		defaultSource = \ts0; // silent by default; tests set audible sources
@@ -68,6 +73,11 @@ MagicPedalboardNew : Object {
 		this.rebuild(currentChain);
 		this.rebuild(nextChain);
 		Ndef(\chainA).play(numChannels: defaultNumChannels);
+
+
+		if(display.notNil) {
+			display.showInit(this, version, currentChain, nextChain);
+		};
 
 		^this
 	}
@@ -98,16 +108,25 @@ MagicPedalboardNew : Object {
 
 	printChains {
 		var annotateCurrent, annotateNext;
+		var bypassAKeys, bypassBKeys;
+
 		annotateCurrent = { |listRef| if(listRef === currentChain) { "  (current)" } { "" } };
 		annotateNext = { |listRef| if(listRef === nextChain) { "  (next)" } { "" } };
 
-		"MagicPedalboardNew.printChains:".postln;
+		bypassAKeys = this.bypassKeysForListInternal(chainAList);
+		bypassBKeys = this.bypassKeysForListInternal(chainBList);
 
-		("A: " ++ chainAList ++ annotateCurrent.(chainAList) ++ annotateNext.(chainAList)).postln;
-		("   bypassA: " ++ this.bypassKeysForListInternal(chainAList)).postln;
+		if(display.notNil) {
+			display.showChains(chainAList, chainBList, bypassAKeys, bypassBKeys);
+		}{
+			"MagicPedalboardNew.printChains:".postln;
 
-		("B: " ++ chainBList ++ annotateCurrent.(chainBList) ++ annotateNext.(chainBList)).postln;
-		("   bypassB: " ++ this.bypassKeysForListInternal(chainBList)).postln;
+			("A: " ++ chainAList ++ annotateCurrent.(chainAList) ++ annotateNext.(chainAList)).postln;
+			("   bypassA: " ++ this.bypassKeysForListInternal(chainAList)).postln;
+
+			("B: " ++ chainBList ++ annotateCurrent.(chainBList) ++ annotateNext.(chainBList)).postln;
+			("   bypassB: " ++ this.bypassKeysForListInternal(chainBList)).postln;
+		}
 	}
 
 	playCurrent {
@@ -115,12 +134,14 @@ MagicPedalboardNew : Object {
 		sinkKey = currentChain[0];
 		this.rebuild(currentChain);
 		Ndef(sinkKey).play(numChannels: defaultNumChannels);
+		if(display.notNil) { display.showPlay(sinkKey) };
 	}
 
 	stopCurrent {
 		var sinkKey;
 		sinkKey = currentChain[0];
 		Ndef(sinkKey).stop;
+		if(display.notNil) { display.showStop(sinkKey) };
 	}
 
 	switchChain {
@@ -138,6 +159,9 @@ MagicPedalboardNew : Object {
 
 		newSinkKey = currentChain[0];
 		Ndef(newSinkKey).play(numChannels: defaultNumChannels);
+
+		if(display.notNil) { display.showSwitch(oldSinkKey, newSinkKey, currentChain, nextChain) };
+
 	}
 
 	// ---- next-chain mutations ------------------------------------------------
@@ -146,6 +170,8 @@ MagicPedalboardNew : Object {
 		var insertIndex;
 		insertIndex = nextChain.size - 1; // just before source
 		this.addAt(key, insertIndex);
+		if(display.notNil) { display.showMutation(\add, [key], nextChain) };
+
 	}
 
 	addAt { | key, index |
@@ -154,6 +180,9 @@ MagicPedalboardNew : Object {
 		newList = nextChain.insert(indexClamped, key);    // returns a new Array
 		this.setNextListInternal(newList);
 		this.rebuild(nextChain);
+
+		if(display.notNil) { display.showMutation(\addAt, [key, indexClamped], nextChain) };
+
 	}
 
 	removeAt { | index |
@@ -177,6 +206,9 @@ MagicPedalboardNew : Object {
 
 				this.rebuild(nextChain);
 				("removed: " ++ removedKey).postln;
+
+				if(display.notNil) { display.showMutation(\removeAt, [index, removedKey], nextChain) }; // removeAt
+
 			}
 		}
 	}
@@ -199,6 +231,9 @@ MagicPedalboardNew : Object {
 
 			this.setNextListInternal(newList);
 			this.rebuild(nextChain);
+
+			if(display.notNil) { display.showMutation(\swap, [indexA, indexB], nextChain) }; // swap
+
 		}
 	}
 
@@ -215,6 +250,9 @@ MagicPedalboardNew : Object {
 
 		this.bypassDictForListInternal(nextChain).clear;
 		this.rebuild(nextChain);
+
+		if(display.notNil) { display.showMutation(\clearChain, [], nextChain) };        // clearChain
+
 	}
 
 	bypass { | key, state = true |
@@ -222,6 +260,10 @@ MagicPedalboardNew : Object {
 		dict = this.bypassDictForListInternal(nextChain);
 		dict[key] = state;
 		this.rebuild(nextChain);
+
+		if(display.notNil) {
+			display.showBypass(\next, key, state, nextChain, this.bypassKeysForListInternal(nextChain));
+		};
 	}
 
 	bypassAt { | index, state = true |
@@ -239,6 +281,11 @@ MagicPedalboardNew : Object {
 		dict = this.bypassDictForListInternal(currentChain);
 		dict[key] = state;
 		this.rebuild(currentChain);
+
+		if(display.notNil) {
+			display.showBypass(\current, key, state, currentChain, this.bypassKeysForListInternal(currentChain));
+		};
+
 	}
 
 	bypassAtCurrent { | index, state = true |
@@ -247,6 +294,8 @@ MagicPedalboardNew : Object {
 		clampedIndex = index.clip(1, lastIndex - 1);
 		keyAtIndex = currentChain[clampedIndex];
 		this.bypassCurrent(keyAtIndex, state);
+
+
 	}
 
 	// ---- diagnostics helpers -------------------------------------------------
@@ -275,6 +324,10 @@ MagicPedalboardNew : Object {
 
 		Ndef(sinkBKey).stop;
 		Ndef(sinkAKey).play(numChannels: defaultNumChannels);
+
+
+		if(display.notNil) { display.showReset(currentChain, nextChain) };
+
 	}
 
 	// ───────────────────────────────────────────────────────────────
@@ -297,6 +350,10 @@ MagicPedalboardNew : Object {
 		dict.keysValuesDo { |key, state| if(state == true) { keysBypassed = keysBypassed.add(key) } };
 		^keysBypassed
 	}
+
+
+
+
 
 	ensureStereoInternal { | key |
 		var proxyBus;
@@ -329,6 +386,7 @@ MagicPedalboardNew : Object {
 
 	rebuild { | listRef |
 		var effective, index, leftKey, rightKey, sinkKey;
+		var which;
 
 		if(listRef.size < 2) { ^this };
 
@@ -346,6 +404,11 @@ MagicPedalboardNew : Object {
 		sinkKey = effective[0];
 		if(listRef === currentChain) { Ndef(sinkKey).play(numChannels: defaultNumChannels) }
 		{ Ndef(sinkKey).stop };
+
+		which = (listRef === currentChain).if(\current, \next);
+
+		if(display.notNil) { display.showRebuild(which, listRef, effective) };
+
 	}
 
 	// --- source setters (public) ---
@@ -357,6 +420,9 @@ MagicPedalboardNew : Object {
 		newList[lastIndex] = key;
 		this.setNextListInternal(newList);
 		this.rebuild(nextChain);
+
+		if(display.notNil) { display.showMutation(\setSource, [key], nextChain) };           // setSource
+
 	}
 
 	setSourceCurrent { | key |
@@ -370,7 +436,7 @@ MagicPedalboardNew : Object {
 			chainBList = newList; currentChain = chainBList;
 		};
 		this.rebuild(currentChain);
+
+		if(display.notNil) { display.showMutation(\setSourceCurrent, [key], currentChain) }; // setSourceCurrent
 	}
-
-
 }
