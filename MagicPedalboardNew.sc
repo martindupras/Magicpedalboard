@@ -1,52 +1,47 @@
-/*  MagicPedalboardNew.sc  v0.3.3
-    A/B pedalboard chain manager built on Ndefs.
-    - Chains are Arrays of Symbols ordered [sink, …, source].
-    - Uses JITLib embedding: Ndef(left) <<> Ndef(right).
-    - Creates two sinks: \chainA and \chainB, and plays the current chain on init.
-    - Most mutators act on the next chain; explicit current-chain bypass helpers are provided.
-    - Optional display adaptor (MagicDisplay) receives notifications, including detailed chain views.
-    // MD 20250912-1345
+/* MagicPedalboardNew.sc v0.3.5
+ A/B pedalboard chain manager built on Ndefs.
+
+ - Chains are Arrays of Symbols ordered [sink, …, source].
+ - Uses JITLib embedding: Ndef(left) <<> Ndef(right).
+ - Creates two sinks: \chainA and \chainB, and plays the current chain on init.
+ - Most mutators act on the next chain; explicit current-chain bypass helpers are provided.
+ - Optional display adaptor (MagicDisplay / MagicDisplayGUI) receives notifications, including detailed chain views.
+ // MD 20250912-1451
 */
-
 MagicPedalboardNew : Object {
-
     // ───────────────────────────────────────────────────────────────
     // class metadata
     // ───────────────────────────────────────────────────────────────
-    classvar < version;
+    classvar <version;
 
     // ───────────────────────────────────────────────────────────────
     // instance state
     // ───────────────────────────────────────────────────────────────
-    var < currentChain;      // read-only pointer
-    var < nextChain;         // read-only pointer
-
-    var chainAList;          // [\chainA, ...processors..., source]
-    var chainBList;          // [\chainB, ...processors..., source]
-
-    var bypassA;             // IdentityDictionary: key(Symbol) -> Bool
-    var bypassB;             // IdentityDictionary: key(Symbol) -> Bool
-
-    var < defaultNumChannels;
-    var < defaultSource;
-
-    // optional display adaptor (console now, GUI later)
-    var < display;
-
+    var <currentChain;  // read-only pointer
+    var <nextChain;     // read-only pointer
+    var chainAList;     // [\chainA, ...processors..., source]
+    var chainBList;     // [\chainB, ...processors..., source]
+    var bypassA;        // IdentityDictionary: key(Symbol) -> Bool
+    var bypassB;        // IdentityDictionary: key(Symbol) -> Bool
+    var <defaultNumChannels;
+    var <defaultSource;
+    var <display;       // optional display adaptor
     *initClass {
-        version = "v0.3.2";
-        ("MagicPedalboardNew " ++ version).postln;
+        var text;
+        version = "v0.3.5";
+        text = "MagicPedalboardNew " ++ version;
+        text.postln;
     }
 
-    *new { |disp = nil|
-        ^super.new.init(disp)
+    *new { arg disp = nil;
+        var instance;
+        instance = super.new;
+        ^instance.init(disp);
     }
 
-    init { |disp|
+    init { arg disp;
         var sinkFunc;
-
         display = disp;
-
         defaultNumChannels = 2;
         defaultSource = \ts0;
 
@@ -68,25 +63,27 @@ MagicPedalboardNew : Object {
         currentChain = chainAList;
         nextChain = chainBList;
 
-        // initial wiring + start
         this.rebuild(currentChain);
         this.rebuild(nextChain);
-        Server.default.bind({ Ndef(\chainA).play(numChannels: defaultNumChannels) });
+
+        Server.default.bind({
+            Ndef(\chainA).play(numChannels: defaultNumChannels);
+        });
 
         if(display.notNil) {
             display.showInit(this, version, currentChain, nextChain);
         };
-
         ^this
     }
 
     // ───────────────────────────────────────────────────────────────
     // public API
     // ───────────────────────────────────────────────────────────────
-
-    setDisplay { |disp|
+    setDisplay { arg disp;
+        var shouldShow;
         display = disp;
-        if(display.notNil) {
+        shouldShow = display.notNil;
+        if(shouldShow) {
             display.showInit(this, version, currentChain, nextChain);
         };
     }
@@ -99,46 +96,45 @@ MagicPedalboardNew : Object {
         ++ "Chains are Arrays of Symbols ordered [sink, …, source].\n"
         ++ "On init, creates \\chainA and \\chainB and plays current.\n\n"
         ++ "Core methods (operate mostly on the *next* chain):\n"
-        ++ "  printChains\n"
-        ++ "  playCurrent, stopCurrent, switchChain\n"
-        ++ "  add(key), addAt(key, index)\n"
-        ++ "  removeAt(index), swap(indexA, indexB)\n"
-        ++ "  bypass(key, state=true), bypassAt(index, state=true)\n"
-        ++ "  clearChain\n"
+        ++ " printChains\n"
+        ++ " playCurrent, stopCurrent, switchChain([fadeTime])\n"
+        ++ " add(key), addAt(key, index)\n"
+        ++ " removeAt(index), swap(indexA, indexB)\n"
+        ++ " bypass(key, state=true), bypassAt(index, state=true)\n"
+        ++ " clearChain\n"
         ++ "Current-chain bypass helpers:\n"
-        ++ "  bypassCurrent(key, state=true), bypassAtCurrent(index, state=true)\n"
+        ++ " bypassCurrent(key, state=true), bypassAtCurrent(index, state=true)\n"
         ++ "Diagnostics/helpers:\n"
-        ++ "  effectiveCurrent, effectiveNext, bypassKeysCurrent, bypassKeysNext, reset\n"
+        ++ " effectiveCurrent, effectiveNext, bypassKeysCurrent, bypassKeysNext, reset\n"
         ++ "Source setters:\n"
-        ++ "  setSource(key) [next], setSourceCurrent(key) [current]\n";
+        ++ " setSource(key) [next], setSourceCurrent(key) [current]\n";
         text.postln;
     }
 
     // Detailed printing routed through display if available
     printChains {
-        var bypassAKeys, bypassBKeys, effA, effB;
-
+        var bypassAKeys, bypassBKeys, effectiveA, effectiveB, hasDisplay;
         bypassAKeys = this.bypassKeysForListInternal(chainAList);
         bypassBKeys = this.bypassKeysForListInternal(chainBList);
+        effectiveA = this.effectiveListForInternal(chainAList);
+        effectiveB = this.effectiveListForInternal(chainBList);
+        hasDisplay = display.notNil and: { display.respondsTo(\showChainsDetailed) };
 
-        effA = this.effectiveListForInternal(chainAList);
-        effB = this.effectiveListForInternal(chainBList);
-
-        if(display.notNil and: { display.respondsTo(\showChainsDetailed) }) {
+        if(hasDisplay) {
             display.showChainsDetailed(
                 chainAList, chainBList,
                 bypassAKeys, bypassBKeys,
-                effA, effB
+                effectiveA, effectiveB
             );
         }{
             "— Chains —".postln;
             "MagicPedalboardNew.printChains:".postln;
-            ("A: " ++ chainAList ++ (if(chainAList === currentChain) { "  (current)" } { "  (next)" })).postln;
-            ("   bypassA: " ++ bypassAKeys).postln;
-            ("   effA:    " ++ effA).postln;
-            ("B: " ++ chainBList ++ (if(chainBList === currentChain) { "  (current)" } { "  (next)" })).postln;
-            ("   bypassB: " ++ bypassBKeys).postln;
-            ("   effB:    " ++ effB).postln;
+            ("A: " ++ chainAList ++ (if(chainAList === currentChain) { " (current)" } { " (next)" })).postln;
+            (" bypassA: " ++ bypassAKeys).postln;
+            (" effA: " ++ effectiveA).postln;
+            ("B: " ++ chainBList ++ (if(chainBList === currentChain) { " (current)" } { " (next)" })).postln;
+            (" bypassB: " ++ bypassBKeys).postln;
+            (" effB: " ++ effectiveB).postln;
             "".postln;
         };
     }
@@ -147,38 +143,52 @@ MagicPedalboardNew : Object {
         var sinkKey;
         sinkKey = currentChain[0];
         this.rebuild(currentChain);
-        Server.default.bind({ Ndef(sinkKey).play(numChannels: defaultNumChannels) });
+        Server.default.bind({
+            Ndef(sinkKey).play(numChannels: defaultNumChannels);
+        });
         if(display.notNil) { display.showPlay(sinkKey) };
     }
 
     stopCurrent {
         var sinkKey;
         sinkKey = currentChain[0];
-        Server.default.bind({ Ndef(sinkKey).stop });
+        Server.default.bind({
+            Ndef(sinkKey).stop;
+        });
         if(display.notNil) { display.showStop(sinkKey) };
     }
 
-    switchChain {
-        var tempChainRef, oldSinkKey, newSinkKey;
-
+    // Crossfading chain switch (default 0.1 s)
+    switchChain { arg fadeTime = 0.1;
+        var temporaryList, oldSinkKey, newSinkKey, actualFadeTime;
+        actualFadeTime = fadeTime.clip(0.08, 0.2); // keep it short and safe
         oldSinkKey = currentChain[0];
+        newSinkKey = nextChain[0];
 
         Server.default.bind({
-            // stop old current sink
+            this.ensureServerTree;
+
+            // set fade times up-front
+            Ndef(oldSinkKey).fadeTime_(actualFadeTime);
+            Ndef(newSinkKey).fadeTime_(actualFadeTime);
+
+            // prebuild NEXT so it is ready to play
+            this.rebuildUnbound(nextChain);
+
+            // start NEXT (will fade in)
+            Ndef(newSinkKey).play(numChannels: defaultNumChannels);
+
+            // fade out and stop OLD
             Ndef(oldSinkKey).stop;
 
             // swap pointers
-            tempChainRef = currentChain;
+            temporaryList = currentChain;
             currentChain = nextChain;
-            nextChain = tempChainRef;
+            nextChain = temporaryList;
 
-            // rebuild both without nesting binds
-            this.rebuildUnbound(nextChain);
+            // ensure both chains are in the right state after the swap
             this.rebuildUnbound(currentChain);
-
-            // start new current sink
-            newSinkKey = currentChain[0];
-            Ndef(newSinkKey).play(numChannels: defaultNumChannels);
+            this.rebuildUnbound(nextChain);
         });
 
         if(display.notNil) {
@@ -186,49 +196,15 @@ MagicPedalboardNew : Object {
         };
     }
 
-	// added fade version
-switchChainWithFade {
-    var tempChainRef, oldSinkKey, newSinkKey, fadeTime;
-    fadeTime = 0.1; // seconds
-
-    oldSinkKey = currentChain[0];
-    newSinkKey = nextChain[0];
-
-    Server.default.bind {
-        // fade out old sink
-        Ndef(oldSinkKey).fadeTime_(fadeTime);
-        Ndef(oldSinkKey).stop;
-
-        // swap chains
-        tempChainRef = currentChain;
-        currentChain = nextChain;
-        nextChain = tempChainRef;
-
-        // rebuild both chains
-        this.rebuildUnbound(nextChain);
-        this.rebuildUnbound(currentChain);
-
-        // fade in new sink
-        Ndef(newSinkKey).fadeTime_(fadeTime);
-        Ndef(newSinkKey).play(numChannels: defaultNumChannels);
-    };
-
-    if(display.notNil) {
-        display.showSwitch(oldSinkKey, currentChain[0], currentChain, nextChain);
-    };
-}
-
-
-    // ---- next-chain mutations ------------------------------------------------
-
-    add { | key |
+    // ─── next-chain mutations ─────────────────────────────────────
+    add { arg key;
         var insertIndex;
         insertIndex = nextChain.size - 1;
         this.addAt(key, insertIndex);
         if(display.notNil) { display.showMutation(\add, [key], nextChain) };
     }
 
-    addAt { | key, index |
+    addAt { arg key, index;
         var indexClamped, newList;
         indexClamped = index.clip(1, nextChain.size - 1);
         newList = nextChain.insert(indexClamped, key);
@@ -237,9 +213,8 @@ switchChainWithFade {
         if(display.notNil) { display.showMutation(\addAt, [key, indexClamped], nextChain) };
     }
 
-    removeAt { | index |
+    removeAt { arg index;
         var sizeNow, lastIndex, newList, removedKey;
-
         sizeNow = nextChain.size;
         lastIndex = sizeNow - 1;
 
@@ -258,15 +233,13 @@ switchChainWithFade {
                 this.bypassDictForListInternal(nextChain).removeAt(removedKey);
                 this.rebuild(nextChain);
                 if(display.notNil) { display.showMutation(\removeAt, [index, removedKey], nextChain) };
-            }
-        }
+            };
+        };
     }
 
-    swap { | indexAParam, indexBParam |
+    swap { arg indexAParam, indexBParam;
         var lastIndex, indexA, indexB, newList, tempKey;
-
         lastIndex = nextChain.size - 1;
-
         indexA = indexAParam.clip(1, lastIndex - 1);
         indexB = indexBParam.clip(1, lastIndex - 1);
 
@@ -280,17 +253,14 @@ switchChainWithFade {
             this.setNextListInternal(newList);
             this.rebuild(nextChain);
             if(display.notNil) { display.showMutation(\swap, [indexA, indexB], nextChain) };
-        }
+        };
     }
 
     clearChain {
         var sinkKey, sourceKey, newList;
-
         if(nextChain.size < 2) { ^this };
-
         sinkKey = nextChain[0];
         sourceKey = nextChain[nextChain.size - 1];
-
         newList = [sinkKey, sourceKey];
         this.setNextListInternal(newList);
         this.bypassDictForListInternal(nextChain).clear;
@@ -298,7 +268,7 @@ switchChainWithFade {
         if(display.notNil) { display.showMutation(\clearChain, [], nextChain) };
     }
 
-    bypass { | key, state = true |
+    bypass { arg key, state = true;
         var dict;
         dict = this.bypassDictForListInternal(nextChain);
         dict[key] = state;
@@ -308,7 +278,7 @@ switchChainWithFade {
         };
     }
 
-    bypassAt { | index, state = true |
+    bypassAt { arg index, state = true;
         var lastIndex, clampedIndex, keyAtIndex;
         lastIndex = nextChain.size - 1;
         clampedIndex = index.clip(1, lastIndex - 1);
@@ -316,9 +286,8 @@ switchChainWithFade {
         this.bypass(keyAtIndex, state);
     }
 
-    // ---- current-chain bypass ------------------------------------------------
-
-    bypassCurrent { | key, state = true |
+    // ─── current-chain bypass ─────────────────────────────────────
+    bypassCurrent { arg key, state = true;
         var dict;
         dict = this.bypassDictForListInternal(currentChain);
         dict[key] = state;
@@ -328,7 +297,7 @@ switchChainWithFade {
         };
     }
 
-    bypassAtCurrent { | index, state = true |
+    bypassAtCurrent { arg index, state = true;
         var lastIndex, clampedIndex, keyAtIndex;
         lastIndex = currentChain.size - 1;
         clampedIndex = index.clip(1, lastIndex - 1);
@@ -336,9 +305,8 @@ switchChainWithFade {
         this.bypassCurrent(keyAtIndex, state);
     }
 
-    // ---- source setters (built-in) ------------------------------------------
-
-    setSource { | key |
+    // ─── source setters ───────────────────────────────────────────
+    setSource { arg key;
         var newList, lastIndex;
         lastIndex = nextChain.size - 1;
         newList = nextChain.copy;
@@ -348,22 +316,18 @@ switchChainWithFade {
         if(display.notNil) { display.showMutation(\setSource, [key], nextChain) };
     }
 
-    setSourceCurrent { | key |
-        var newList, lastIndex;
+    setSourceCurrent { arg key;
+        var newList, lastIndex, isAList;
         lastIndex = currentChain.size - 1;
         newList = currentChain.copy;
         newList[lastIndex] = key;
-        if(currentChain === chainAList) {
-            chainAList = newList; currentChain = chainAList;
-        }{
-            chainBList = newList; currentChain = chainBList;
-        };
+        isAList = currentChain === chainAList;
+        if(isAList) { chainAList = newList; currentChain = chainAList } { chainBList = newList; currentChain = chainBList };
         this.rebuild(currentChain);
         if(display.notNil) { display.showMutation(\setSourceCurrent, [key], currentChain) };
     }
 
-    // ---- diagnostics helpers -------------------------------------------------
-
+    // ─── diagnostics helpers ──────────────────────────────────────
     effectiveCurrent { ^this.effectiveListForInternal(currentChain) }
     effectiveNext    { ^this.effectiveListForInternal(nextChain) }
     bypassKeysCurrent { ^this.bypassKeysForListInternal(currentChain) }
@@ -371,7 +335,6 @@ switchChainWithFade {
 
     reset {
         var sinkAKey, sinkBKey;
-
         sinkAKey = \chainA;
         sinkBKey = \chainB;
 
@@ -397,73 +360,70 @@ switchChainWithFade {
     // ───────────────────────────────────────────────────────────────
     // internal helpers (lowercase, no leading underscore)
     // ───────────────────────────────────────────────────────────────
-
-    setNextListInternal { | newList |
-        if(nextChain === chainAList) {
-            chainAList = newList; nextChain = chainAList;
-        }{
-            chainBList = newList; nextChain = chainBList;
-        }
+    setNextListInternal { arg newList;
+        var isAList;
+        isAList = nextChain === chainAList;
+        if(isAList) { chainAList = newList; nextChain = chainAList } { chainBList = newList; nextChain = chainBList };
     }
 
-    bypassDictForListInternal { | listRef |
+    bypassDictForListInternal { arg listRef;
         ^if(listRef === chainAList) { bypassA } { bypassB }
     }
 
-    bypassKeysForListInternal { | listRef |
+    bypassKeysForListInternal { arg listRef;
         var dict, keysBypassed;
-
         dict = this.bypassDictForListInternal(listRef);
         keysBypassed = Array.new;
-
-        dict.keysValuesDo { |key, state|
+        dict.keysValuesDo { arg key, state;
             if(state == true) { keysBypassed = keysBypassed.add(key) };
         };
-
         ^keysBypassed
     }
 
-    ensureStereoInternal { | key |
-        var proxyBus;
+    ensureStereoInternal { arg key;
+        var proxyBus, needsInit;
         proxyBus = Ndef(key).bus;
-        if(proxyBus.isNil or: { proxyBus.rate != \audio } or: { proxyBus.numChannels != defaultNumChannels }) {
+        needsInit = proxyBus.isNil or: { proxyBus.rate != \audio } or: { proxyBus.numChannels != defaultNumChannels };
+        if(needsInit) {
             Ndef(key).ar(defaultNumChannels);
         };
     }
 
     ensureServerTree {
-        if(Server.default.serverRunning) {
+        var isRunning;
+        isRunning = Server.default.serverRunning;
+        if(isRunning) {
             Server.default.initTree;
         };
     }
 
-    effectiveListForInternal { | listRef |
+    effectiveListForInternal { arg listRef;
         var dict, resultList, lastIndex;
-
         dict = this.bypassDictForListInternal(listRef);
         resultList = Array.new;
         lastIndex = listRef.size - 1;
 
-        listRef.do { |key, indexPosition|
+        listRef.do { arg key, indexPosition;
             var isProcessor, isBypassed;
             isProcessor = (indexPosition > 0) and: (indexPosition < lastIndex);
             isBypassed = isProcessor and: { dict[key] == true };
+
             if((indexPosition == 0) or: { indexPosition == lastIndex }) {
                 resultList = resultList.add(key);
             }{
                 if(isBypassed.not) { resultList = resultList.add(key) };
             };
         };
-
         ^resultList
     }
 
-    // Public rebuild: bundles server ops
-    rebuild { | listRef |
+    // Public rebuild: bundles server ops; now guards with ensureServerTree at the top
+    rebuild { arg listRef;
         var whichChain;
         whichChain = if(listRef === currentChain) { \current } { \next };
 
         Server.default.bind({
+            this.ensureServerTree;
             this.rebuildUnbound(listRef);
         });
 
@@ -473,17 +433,17 @@ switchChainWithFade {
     }
 
     // Internal rebuild that assumes we are already inside a server bind
-    rebuildUnbound { | listRef |
-        var effective, indexCounter, leftKey, rightKey, sinkKey;
-
-        if(listRef.size < 2) { ^this };
+    rebuildUnbound { arg listRef;
+        var effective, indexCounter, leftKey, rightKey, sinkKey, hasMin;
+        hasMin = listRef.size >= 2;
+        if(hasMin.not) { ^this };
 
         this.ensureServerTree;
 
         effective = this.effectiveListForInternal(listRef);
 
-        effective.do { |keySymbol|
-            this.ensureStereoInternal(keySymbol)
+        effective.do { arg keySymbol;
+            this.ensureStereoInternal(keySymbol);
         };
 
         indexCounter = 0;
@@ -495,7 +455,6 @@ switchChainWithFade {
         };
 
         sinkKey = effective[0];
-
         if(listRef === currentChain) {
             Ndef(sinkKey).play(numChannels: defaultNumChannels);
         }{
