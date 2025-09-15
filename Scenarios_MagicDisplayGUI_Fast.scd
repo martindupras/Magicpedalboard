@@ -1,77 +1,137 @@
-/* Scenarios_MagicDisplayGUI_Fast.scd
-   Purpose: AppClock-driven scenario set (1/2/3). Safe even if internal queue doesn't flush.
-   Style: tilde vars, var-first, lowercase, no server.sync, no single-letter locals.
-*/
-
 (
-// helper: run steps on AppClock with SystemClock pacing
-~md_makeFastScenario = {
-    |labelString, paceSeconds, stepFuncs|
-    var controllerRoutine, totalSteps, stepIndex;
+// Scenarios_MagicDisplayGUI_Fast.scd
+// Fast Scenario 1/2/3 — AppClock per step, no watchers
+// Uses ~refreshGuiFromMpb + ~gui.showExpectation via ~gui.queueUi
+// Style: tilde vars, var-first, lowercase, no single-letter locals
+~md_with_queue_ui = { |ui_func|
+    var runnable, has_gui, can_queue;
+    runnable = ui_func ? { };
+    has_gui = ~gui.notNil;
+    can_queue = has_gui and: { ~gui.respondsTo(\queueUi) };
+    if(can_queue) {
+        ~gui.queueUi.(runnable);
+    }{
+        "[GUI] queueUi unavailable — skipping ui_func".postln;
+    };
+};
 
-    totalSteps = stepFuncs.size;
-    ~mdgTask.notNil.if({ ~mdgTask.stop; ~mdgTask = nil });
+// -------- Scenario 1 (fast): visible step-by-step updates --------
+~sc_fast_scenario1 = { |done_func|
+    var step_interval, schedule_next;
 
-    controllerRoutine = Routine({
-        stepIndex = 0;
-        while({ stepIndex < totalSteps }, {
-            AppClock.sched(0, { stepFuncs[stepIndex].value; nil });
-            paceSeconds.wait;
-            stepIndex = stepIndex + 1;
+    step_interval = 0.25;
+    schedule_next = { |func_to_run|
+        var next_func;
+        next_func = func_to_run ? { };
+        AppClock.sched(step_interval, { next_func.value; nil });
+    };
+
+    AppClock.sched(0.0, {
+        ~md_with_queue_ui.({
+            if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 1: step 0"); };
         });
+        ~refreshGuiFromMpb.("sc1-step0");
+
+        schedule_next.({
+            ~md_with_queue_ui.({
+                if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 1: step 1"); };
+            });
+            ~refreshGuiFromMpb.("sc1-step1");
+
+            schedule_next.({
+                ~md_with_queue_ui.({
+                    if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 1: step 2"); };
+                });
+                ~refreshGuiFromMpb.("sc1-step2");
+
+                schedule_next.({
+                    ~md_with_queue_ui.({
+                        if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 1: step 3"); };
+                    });
+                    ~refreshGuiFromMpb.("sc1-step3");
+
+                    schedule_next.({
+                        ~md_with_queue_ui.({
+                            if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 1: step 4"); };
+                        });
+                        ~refreshGuiFromMpb.("sc1-step4");
+
+                        schedule_next.({
+                            ~md_with_queue_ui.({
+                                if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 1: done"); };
+                            });
+                            ~refreshGuiFromMpb.("sc1-done");
+                            if(done_func.notNil) { done_func.value };
+                        });
+                    });
+                });
+            });
+        });
+        nil
     });
-
-    ~mdgTask = controllerRoutine.play(SystemClock);
-    ~mdgTask
 };
 
-// scenario 1 (duplicate of runner’s, kept here so all three live together)
-~scenario1v6_fast = {
-    var paceSeconds, steps;
-    if(~mpb.isNil or: { ~gui.isNil }) { "Run ~bootGuiV6.() first.".warn; ^nil };
+// -------- Scenario 2 (fast): brief A/B hint without audio --------
+~sc_fast_scenario2 = { |done_func|
+    var step_interval;
+    step_interval = 0.2;
 
-    paceSeconds = 0.8;
-    steps = [
-        { "[SC] init".postln; ~gui.showExpectation("Command: init", 0); ~refreshGuiFromMpb.() },
-        { "[SC] add flanger".postln; ~gui.showExpectation("Command: add flanger", 0); ~mpb.add(\flanger); ~refreshGuiFromMpb.() },
-        { "[SC] bypass flanger true".postln; ~gui.showExpectation("Command: bypass flanger true", 0); ~mpb.bypass(\flanger, true); ~refreshGuiFromMpb.() },
-        { "[SC] add delay".postln; ~gui.showExpectation("Command: add delay", 0); ~mpb.add(\delay); ~refreshGuiFromMpb.() },
-        { "[SC] clear NEXT".postln; ~gui.showExpectation("Command: clear NEXT", 0); ~mpb.clearChain; ~refreshGuiFromMpb.() }
-    ];
-    ~md_makeFastScenario.("scenario1-fast", paceSeconds, steps);
+    AppClock.sched(0.0, {
+        ~md_with_queue_ui.({
+            if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 2: A-chain preview"); };
+        });
+        ~refreshGuiFromMpb.("sc2-A");
+
+        AppClock.sched(step_interval, {
+            ~md_with_queue_ui.({
+                if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 2: B-chain preview"); };
+            });
+            ~refreshGuiFromMpb.("sc2-B");
+
+            AppClock.sched(step_interval, {
+                ~md_with_queue_ui.({
+                    if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 2: done"); };
+                });
+                ~refreshGuiFromMpb.("sc2-done");
+                if(done_func.notNil) { done_func.value };
+                nil
+            });
+
+            nil
+        });
+
+        nil
+    });
 };
 
-// scenario 2
-~scenario2v6_fast = {
-    var paceSeconds, steps;
-    if(~mpb.isNil or: { ~gui.isNil }) { "Run ~bootGuiV6.() first.".warn; ^nil };
+// -------- Scenario 3 (fast): mini churn --------
+~sc_fast_scenario3 = { |done_func|
+    var step_interval, index, rounds;
 
-    paceSeconds = 0.25;
-    steps = [
-        { "[SC] init".postln; ~gui.showExpectation("Command: init", 0); ~refreshGuiFromMpb.() },
-        { "[SC] add chorus".postln; ~gui.showExpectation("Command: add chorus", 0); ~mpb.add(\chorus); ~refreshGuiFromMpb.() },
-        { "[SC] add reverb".postln; ~gui.showExpectation("Command: add reverb", 0); ~mpb.add(\reverb); ~refreshGuiFromMpb.() },
-        { "[SC] add tremolo".postln; ~gui.showExpectation("Command: add tremolo", 0); ~mpb.add(\tremolo); ~refreshGuiFromMpb.() },
-        { "[SC] removeAt 2".postln; ~gui.showExpectation("Command: removeAt 2", 0); ~mpb.removeAt(2); ~refreshGuiFromMpb.() },
-        { "[SC] add phaser".postln; ~gui.showExpectation("Command: add phaser", 0); ~mpb.add(\phaser); ~refreshGuiFromMpb.() },
-        { "[SC] clear NEXT".postln; ~gui.showExpectation("Command: clear NEXT", 0); ~mpb.clearChain; ~refreshGuiFromMpb.() }
-    ];
-    ~md_makeFastScenario.("scenario2-fast", paceSeconds, steps);
-};
+    step_interval = 0.18;
+    index = 0;
+    rounds = 5;
 
-// scenario 3
-~scenario3v6_fast = {
-    var paceSeconds, steps;
-    if(~mpb.isNil or: { ~gui.isNil }) { "Run ~bootGuiV6.() first.".warn; ^nil };
-
-    paceSeconds = 0.6;
-    steps = [
-        { "[SC] init".postln; ~gui.showExpectation("Command: init", 0); ~refreshGuiFromMpb.() },
-        { "[SC] add bitcrusher".postln; ~gui.showExpectation("Command: add bitcrusher", 0); ~mpb.add(\bitcrusher); ~refreshGuiFromMpb.() },
-        { "[SC] bypass bitcrusher false".postln; ~gui.showExpectation("Command: bypass bitcrusher false", 0); ~mpb.bypass(\bitcrusher, false); ~refreshGuiFromMpb.() },
-        { "[SC] removeAt 1".postln; ~gui.showExpectation("Command: removeAt 1", 0); ~mpb.removeAt(1); ~refreshGuiFromMpb.() },
-        { "[SC] clear NEXT".postln; ~gui.showExpectation("Command: clear NEXT", 0); ~mpb.clearChain; ~refreshGuiFromMpb.() }
-    ];
-    ~md_makeFastScenario.("scenario3-fast", paceSeconds, steps);
+    AppClock.sched(0.0, {
+        var do_round;
+        do_round = {
+            if(index >= rounds) {
+                ~md_with_queue_ui.({
+                    if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 3: done"); };
+                });
+                ~refreshGuiFromMpb.("sc3-done");
+                if(done_func.notNil) { done_func.value };
+            }{
+                ~md_with_queue_ui.({
+                    if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 3: tick %".format(index)); };
+                });
+                ~refreshGuiFromMpb.("sc3-%".format(index));
+                index = index + 1;
+                AppClock.sched(step_interval, { do_round.value; nil });
+            };
+        };
+        do_round.value;
+        nil
+    });
 };
 )
