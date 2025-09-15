@@ -1,4 +1,4 @@
-/* MagicDisplayGUI.sc v0.2.3
+/* MagicDisplayGUI.sc v0.2.4
  CURRENT column highlighted in green; top-down list (src → procs → sink);
  expectation text + visual countdown; operations list with 3s pre-roll;
  embedded meters (A/B). UI-ready queue prevents touching nil views.
@@ -35,7 +35,7 @@ MagicDisplayGUI : MagicDisplay {
 
     *initClass {
         var text;
-        versionGUI = "v0.2.3";
+        versionGUI = "v0.2.4";
         text = "MagicDisplayGUI " ++ versionGUI;
         text.postln;
     }
@@ -146,7 +146,7 @@ MagicDisplayGUI : MagicDisplay {
 
             expectationText = TextView(window, Rect(pad, leftPanel.bounds.bottom + 6, 2 * panelWidth + 40, 52));
             expectationText.background_(Color(1, 1, 0.9));
-            expectationText.string_("What you should hear will appear here…");
+            expectationText.string_("Command:");
 
             countdownLabel = StaticText(window, Rect(pad, expectationText.bounds.bottom + 6, 120, 20)).string_("Ready");
 
@@ -525,8 +525,8 @@ MagicDisplayGUI : MagicDisplay {
         effNextText    = "eff: " ++ effNext.join(" -> ");
 
         this.queueUi({
-            if(leftHeader.notNil)  { leftHeader.string_("CURRENT (sink=" ++ current[0] ++ ")") };
-            if(rightHeader.notNil) { rightHeader.string_("NEXT (sink=" ++ next[0] ++ ")") };
+            if(leftHeader.notNil)  { leftHeader.string_("CHAIN A ACTIVE") };
+            if(rightHeader.notNil) { rightHeader.string_("CHAIN B NEXT") };
             if(leftListView.notNil)  { leftListView.items_(currentItems) };
             if(rightListView.notNil) { rightListView.items_(nextItems) };
             if(leftEffective.notNil)  { leftEffective.string_(effCurrentText) };
