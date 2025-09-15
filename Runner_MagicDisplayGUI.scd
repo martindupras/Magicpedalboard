@@ -1,356 +1,275 @@
-/* Runner_MagicDisplayGUI.scd
-   Deterministic, single-window GUI boot → probe → scenario (fast).
-   - AppClock-only Qt ops, no watchers/patchers.
-   - Smart reuse (detects dead windows), pedalboard guarantee, singleton window.
-   - Re-entrancy guard + safety unlock.
-   Style: tilde vars, var-first, lowercase, no server.sync, no single-letter locals.
+(
+// =========================
+// Runner_MagicDisplayGUI.scd (wrapped in one block)
+// =========================
+
+/*  Final one-button runner for MagicDisplayGUI tests
+    - SC 3.14 macOS
+    - All GUI work on AppClock
+    - No server.sync
+    - Style: tilde vars, var declarations first, lowercase names, no single-letter vars
+    - Token-gated, re-entrant with auto-unlock
+    - Detects stale windows, coalesces duplicates, ensures exactly one window
+    - Provides:
+        ~md_bootProbeScenario.()
+        ~md_forceCreateWindow.()
+        ~md_frontWindow.()
+        ~md_checkWindows.()
+        ~md_runnerUnlock.()
 */
 
-(
-// ---------------------------
-// 0) state + logging
-// ---------------------------
-~md_bootToken     = (~md_bootToken ? 0);
-~md_runnerActive  = (~md_runnerActive ? false);
-~md_runnerTask    = (~md_runnerTask ? nil);
-~md_log = { |messageString| ("[RUNNER] " ++ messageString).postln };
+/* =========================
+   basic env + guard
+   ========================= */
 
-// ---------------------------
-// 1) window helpers
-// ---------------------------
-~md_isWindowAlive = {
-    var winObj, viewObj, wasRemoved, isClosed, ok;
-    if(~gui.isNil) { ^false };
-    winObj = ~gui.tryPerform(\window);
-    if(winObj.isNil) { ^false };
-    viewObj    = winObj.tryPerform(\view);
-    wasRemoved = viewObj.tryPerform(\wasRemoved);
-    if(wasRemoved.isNil) { wasRemoved = false };
-    isClosed   = winObj.tryPerform(\isClosed);
-    if(isClosed.isNil) { isClosed = false };
-    ok = (wasRemoved == false) and: (isClosed == false);
-    ok
+~md_version = (
+    runner: "Runner 1.0.0",
+    mpb: "MagicPedalboardNew v0.3.8",
+    md: "MagicDisplay v0.1.2",
+    mdgui: "MagicDisplayGUI v0.2.4"
+);
+
+~md_guard = false;
+~md_guard_time = nil;
+~md_guard_timeout = 10.0; // seconds
+~md_run_token = 0;
+
+~md_log = { |text| text.asString.postln };
+~md_now = { Main.elapsedTime };
+
+/* =========================
+   window detection + control
+   ========================= */
+
+~md_window_title_match = { |window|
+    var title;
+    if(window.isNil) { ^false };
+    title = (window.respondsTo(\name) and: { window.name.notNil }) .if({ window.name.asString }, { "" });
+    ^title.contains("MagicDisplayGUI");
+};
+
+~md_get_gui_windows = {
+    var all_windows = Window.allWindows ? [];
+    ^all_windows.select({ |win| ~md_window_title_match.(win) });
+};
+
+~md_window_is_alive = { |window|
+    if(window.isNil) { ^false };
+    ^(window.respondsTo(\visible).if({ window.visible }, { true })
+        and: { window.respondsTo(\view) and: { window.view.notNil } });
+};
+
+~md_close_windows = { |windows_to_close|
+    AppClock.sched(0.0, {
+        windows_to_close.do({ |win_ref|
+            if(~md_window_is_alive.(win_ref)) {
+                "[WIN] closing window: %".format(win_ref.name).postln;
+                win_ref.close;
+            }{
+                "[WIN] stale window reference ignored".postln;
+            };
+        });
+        nil
+    });
+};
+
+~md_close_duplicate_windows = {
+    var gui_windows = ~md_get_gui_windows.();
+    if(gui_windows.size > 1) {
+        "[WIN] duplicates detected (%). Closing all.".format(gui_windows.size).postln;
+        ~md_close_windows.(gui_windows);
+    }{
+        if(gui_windows.size == 1 and: { ~md_window_is_alive.(gui_windows[0]).not }) {
+            "[WIN] stale window found. Closing.".postln;
+            ~md_close_windows.(gui_windows);
+        };
+    };
 };
 
 ~md_frontWindow = {
-    AppClock.sched(0, {
-        var win;
-        win = ~gui.tryPerform(\window);
-        if(win.notNil) {
-            win.alwaysOnTop_(true);
-            win.front;
-            AppClock.sched(0.2, { win.alwaysOnTop_(false); nil });
-        }{
-            "[FRONT] No window to front.".postln;
+	var gui_windows, front_target;
+    gui_windows = ~md_get_gui_windows.();
+    if(gui_windows.size == 0) { "[WIN] no window to front".postln; ^nil };
+    front_target = gui_windows.last;
+    AppClock.sched(0.0, {
+		var previous;
+        if(~md_window_is_alive.(front_target)) {
+            previous = front_target.alwaysOnTop ? false : true;
+            front_target.alwaysOnTop_(true);
+            front_target.front;
+            AppClock.sched(0.05, { front_target.alwaysOnTop_(previous); nil });
+            "[WIN] fronted window: %".format(front_target.name).postln;
         };
         nil
     });
 };
 
-~md_coalesceWindows = {
-    AppClock.sched(0, {
-        var myWin, title, wins, closed;
-        myWin  = ~gui.tryPerform(\window);
-        wins   = Window.allWindows ? [];
-        title  = myWin.notNil.if({ myWin.name.asString }, { "MagicDisplayGUI" });
-        closed = 0;
-        wins.do({ |w|
-            if((myWin.isNil or: { w !== myWin }) and: { w.name.asString == title }) {
-                w.close;
-                closed = closed + 1;
-            }
+/* =========================
+   probe frame overlay
+   ========================= */
+
+~md_probe_view = nil;
+
+~md_attach_probe_frame = {
+    var gui_windows = ~md_get_gui_windows.();
+    if(gui_windows.size == 0) { "[GUI] cannot attach PROBE FRAME".postln; ^nil };
+    var target_window = gui_windows.last;
+    AppClock.sched(0.0, {
+        if(~md_window_is_alive.(target_window).not) { ^nil };
+        var root_view = target_window.view;
+        if(root_view.isNil) { ^nil };
+        if(~md_probe_view.notNil) { (~md_probe_view.tryPerform(\remove) ? nil); ~md_probe_view = nil };
+        var bounds_rect = Rect(8, 8, 180, 24);
+        var probe_view = UserView(root_view, bounds_rect)
+            .background_(Color.clear)
+            .clearOnRefresh_(true);
+        probe_view.drawFunc_({
+            Pen.color_(Color.red);
+            Pen.width = 1.5;
+            Pen.addRect(Rect(0, 0, bounds_rect.width, bounds_rect.height));
+            Pen.stroke;
+            Pen.color_(Color.red);
+            Pen.stringAtPoint("PROBE FRAME", Point(6, 6), Font("Helvetica", 12));
         });
-        ("[COALESCE] closed " ++ closed.asString ++ " extra window(s).").postln;
-        if(myWin.notNil) {
-            myWin.alwaysOnTop_(true);
-            myWin.front;
-            AppClock.sched(0.2, { myWin.alwaysOnTop_(false); nil });
-        };
+        probe_view.visible_(true);
+        ~md_probe_view = probe_view;
+        "[GUI] PROBE FRAME attached".postln;
         nil
     });
 };
+
+/* =========================
+   ensuring mpb + gui build
+   ========================= */
+
+~md_ensure_mpb = {
+    if(~mpb.isNil) {
+        "[BOOT] ~mpb missing — creating".postln;
+        if(MagicPedalboardNew.respondsTo(\new)) { ~mpb = MagicPedalboardNew.new };
+    }{
+        "[BOOT] ~mpb already present".postln;
+    };
+};
+
+~md_try_open_gui_window = {
+    AppClock.sched(0.0, {
+        if(MagicDisplayGUI.respondsTo(\open)) {
+            "[BOOT/AC] MagicDisplayGUI.open".postln;
+            MagicDisplayGUI.open;
+        }{
+            if(~gui.isNil or: { ~gui.isKindOf(MagicDisplayGUI).not }) {
+                "[BOOT/AC] MagicDisplayGUI.new".postln;
+                ~gui = MagicDisplayGUI.new; // <-- Replace with MagicDisplayGUI.new(~mpb) if needed
+            };
+            if(~gui.respondsTo(\open)) { ~gui.open }{ if(~gui.respondsTo(\build)) { ~gui.build } };
+        };
+        AppClock.sched(0.15, { "[WIN] post-open window count: %".format(~md_get_gui_windows.().size).postln; nil });
+        nil
+    });
+};
+
+~md_find_or_create_gui_window = { |on_ready_func, on_fail_func, expect_token|
+    var attempts = 0;
+    var attempt_func;
+    attempt_func = {
+        attempts = attempts + 1;
+        ~md_close_duplicate_windows.();
+        AppClock.sched(0.2, {
+            var gui_windows = ~md_get_gui_windows.();
+            if(gui_windows.size == 1 and: { ~md_window_is_alive.(gui_windows[0]) }) {
+                "[WIN] ready (1 alive window)".postln;
+                if(on_ready_func.notNil) { on_ready_func.value };
+            }{
+                if(gui_windows.size == 0 and: { attempts <= 3 }) {
+                    "[WIN] no window — attempting create (try %/3)".format(attempts).postln;
+                    ~md_try_open_gui_window.();
+                    AppClock.sched(0.3, attempt_func);
+                }{
+                    if(attempts > 3) {
+                        "[WIN] failed to create window".postln;
+                        if(on_fail_func.notNil) { on_fail_func.value };
+                    };
+                };
+            };
+            nil
+        });
+    };
+    AppClock.sched(0.0, attempt_func);
+};
+
+/* =========================
+   public helpers
+   ========================= */
 
 ~md_checkWindows = {
-    AppClock.sched(0, {
-        var wins;
-        wins = Window.allWindows ? [];
-        ("[CHECK] window count = " ++ wins.size).postln;
-        wins.do({ |w, idx| ("[CHECK] w" ++ idx ++ " title=" ++ w.name.asString).postln });
-        nil
-    });
+    var gui_windows = ~md_get_gui_windows.();
+    "[WIN] count = %, titles = %".format(gui_windows.size, gui_windows.collect(_.name.asString)).postln;
 };
 
-~md_checkEnv = {
-    var hasGui, hasMpb;
-    hasGui = ~gui.notNil; hasMpb = ~mpb.notNil;
-    ("[CHECK] has ~gui = " ++ hasGui.asString ++ ", has ~mpb = " ++ hasMpb.asString).postln;
-    if(hasGui and: { ~gui.respondsTo(\window) }) {
-        ("[CHECK] window exists = " ++ (~gui.window.notNil).asString).postln;
-    };
-};
-
-// ---------------------------
-// 2) reset + ensure
-// ---------------------------
-~md_resetSession = {
-    var hadTask, hadBootTask, alive;
-    hadTask    = ~mdgTask.notNil;
-    hadBootTask= ~bootTask.notNil;
-
-    hadTask.if({ ~mdgTask.stop; ~mdgTask = nil; });
-    hadBootTask.if({ ~bootTask.stop; ~bootTask = nil; });
-
-    alive = ~md_isWindowAlive.();
-    if(alive.not) { ~gui = nil };  // force fresh next time
-
-    ~mpb = nil;
-    ~magicDisplay = nil;
-
-    "[RUNNER] Reset: tasks stopped; references cleared."
-        ++ (alive.not.if({ " (~gui cleared: window not alive)" }, { "" })).postln;
-};
-
-~md_ensureMpbNow = {
-    var created;
-    created = false;
-    if(~gui.isNil) { "[ENSURE] No ~gui yet; cannot build ~mpb.".warn; ^false };
-    if(~mpb.isNil) { ~mpb = MagicPedalboardNew(~gui); created = true; "[ENSURE] Built new MagicPedalboardNew (~mpb).".postln; };
-    created or: { ~mpb.notNil }
-};
-
-// ---------------------------
-// 3) fresh creator (used by boot and as emergency fixer)
-// ---------------------------
-~md_forceCreateWindow = {
-    AppClock.sched(0, {
-        var guiObj, board, winReady;
-        "[FORCE] Creating MagicDisplayGUI…".postln;
-        guiObj = MagicDisplayGUI.new;
-        guiObj.enableMeters(false);
-        ~gui = guiObj;
-
-        "[FORCE] Creating MagicPedalboardNew…".postln;
-        board = MagicPedalboardNew(guiObj);
-        ~mpb = board;
-
-        AppClock.sched(0.1, {
-            winReady = ~gui.tryPerform(\window);
-            if(winReady.notNil) {
-                "[FORCE] Window ready — fronting.".postln;
-                winReady.alwaysOnTop_(true);
-                winReady.front;
-                AppClock.sched(0.2, { winReady.alwaysOnTop_(false); nil });
-            }{
-                "[FORCE] Window not yet ready.".postln;
-            };
-            if(~refreshView.notNil) { ~refreshView.("force-create") };
-            // Always coalesce after a force create
-            ~md_coalesceWindows.();
-            nil
-        });
-        nil
-    });
-};
-
-// ---------------------------
-// 4) boot (idempotent), singletonize, guarantee mpb
-// ---------------------------
-~bootGuiV6 = {
-    var myToken;
-    ~md_resetSession.();
-
-    ~md_bootToken = (~md_bootToken ? 0) + 1;
-    myToken = ~md_bootToken;
-
-    "Booting GUI (meters disabled). Waiting for window…".postln;
-
-    AppClock.sched(0, {
-        var winOk, existingWin, guiObj, board;
-
-        if(~md_bootToken != myToken) { ^nil }; // stale invocation
-
-        winOk = ~md_isWindowAlive.();
-        if(winOk) {
-            existingWin = ~gui.tryPerform(\window);
-            "Window found — reusing and fronting.".postln;
-
-            if(~mpb.isNil) {
-                board = MagicPedalboardNew(~gui);
-                ~mpb = board;
-                "[ENSURE] Reuse path created ~mpb.".postln;
-            };
-
-            existingWin.front;
-            // Coalesce duplicate windows even on reuse
-            ~md_coalesceWindows.();
-            if(~refreshView.notNil) { ~refreshView.("boot (reuse)") };
-            ^nil
-        };
-
-        // Fresh create
-        guiObj = MagicDisplayGUI.new;
-        guiObj.enableMeters(false);
-        ~gui = guiObj;
-
-        board = MagicPedalboardNew(guiObj);
-        ~mpb = board;
-        "[ENSURE] Fresh path created ~mpb.".postln;
-
-        AppClock.sched(0.1, {
-            var winReady;
-            if(~md_bootToken != myToken) { ^nil };
-            winReady = ~gui.tryPerform(\window);
-            if(winReady.notNil) {
-                "Window ready — fronting and drawing columns.".postln;
-                winReady.front;
-            };
-            // Coalesce duplicates after fresh create
-            ~md_coalesceWindows.();
-            if(~refreshView.notNil) { ~refreshView.("boot") };
-            nil
-        });
-
-        nil
-    });
-};
-
-// ---------------------------
-// 5) fallbacks if monolithic helpers aren’t loaded
-// ---------------------------
-~refreshGuiFromMpb = ~refreshGuiFromMpb ? {
-    var curr, nxt, bA, bB, eA, eB;
-    if(~gui.isNil or: { ~mpb.isNil }) { "[FALLBACK] Run ~bootGuiV6.() first.".warn; ^nil };
-    curr = ~mpb.currentChain; nxt = ~mpb.nextChain;
-    bA = ~mpb.bypassKeysCurrent; bB = ~mpb.bypassKeysNext;
-    eA = ~mpb.effectiveCurrent; eB = ~mpb.effectiveNext;
-    ~gui.showChainsDetailed(curr, nxt, bA, bB, eA, eB);
-};
-
-~probeGuiV3 = ~probeGuiV3 ? {
-    var hasGui, hasWin, current, next, bypassA, bypassB, effA, effB;
-    hasGui = ~gui.notNil;
-    if(hasGui.not) { "No ~gui. Run ~bootGuiV6.() first.".warn; ^nil };
-    hasWin = ~gui.tryPerform(\window).notNil;
-    ["[PROBE] gui exists:", hasGui, "window exists:", hasWin].postln;
-
-    current = [\chainA, \AAA_debug_one, \BBB_debug_two, \ts0];
-    next    = [\chainB, \CCC_debug_three, \DDD_debug_four, \ts0];
-    bypassA = [\BBB_debug_two];
-    bypassB = [];
-    effA    = [\chainA, \AAA_debug_one, \ts0];
-    effB    = [\chainB, \CCC_debug_three, \DDD_debug_four, \ts0];
-
-    ~gui.showExpectation("Command: PROBE FRAME", 0);
-
-    AppClock.sched(0, {
-        "[PROBE] Calling showChainsDetailed on AppClock…".postln;
-        ~gui.showChainsDetailed(current, next, bypassA, bypassB, effA, effB);
-        "[PROBE] showChainsDetailed returned.".postln;
-        nil
-    });
-    "Probe queued. Expect 'PROBE FRAME' + AAA/BBB/CCC/DDD in lists.".postln;
-};
-
-// ---------------------------
-// 6) fast scenario (AppClock per step)
-// ---------------------------
-~scenario1v6_fast = {
-    var paceSeconds, steps, controllerRoutine, totalSteps, stepIndex;
-
-    if(~mpb.isNil or: { ~gui.isNil }) { "Run ~bootGuiV6.() first.".warn; ^nil };
-
-    paceSeconds = 0.8;
-    steps = [
-        { "[SC] init".postln; ~gui.showExpectation("Command: init", 0); ~refreshGuiFromMpb.() },
-        { "[SC] add flanger".postln; ~gui.showExpectation("Command: add flanger", 0); ~mpb.add(\flanger); ~refreshGuiFromMpb.() },
-        { "[SC] bypass flanger true".postln; ~gui.showExpectation("Command: bypass flanger true", 0); ~mpb.bypass(\flanger, true); ~refreshGuiFromMpb.() },
-        { "[SC] add delay".postln; ~gui.showExpectation("Command: add delay", 0); ~mpb.add(\delay); ~refreshGuiFromMpb.() },
-        { "[SC] clear NEXT".postln; ~gui.showExpectation("Command: clear NEXT", 0); ~mpb.clearChain; ~refreshGuiFromMpb.() }
-    ];
-    totalSteps = steps.size;
-
-    ~mdgTask.notNil.if({ ~mdgTask.stop; ~mdgTask = nil });
-
-    controllerRoutine = Routine({
-        stepIndex = 0;
-        while({ stepIndex < totalSteps }, {
-            AppClock.sched(0, { steps[stepIndex].value; nil });
-            paceSeconds.wait; // pacing on SystemClock
-            stepIndex = stepIndex + 1;
-        });
-    });
-    ~mdgTask = controllerRoutine.play(SystemClock);
-    ~mdgTask
-};
-
-// ---------------------------
-// 7) runner with re-entrancy guard + safety unlock
-// ---------------------------
 ~md_runnerUnlock = {
-    var wasActive;
-    wasActive = ~md_runnerActive ? false;
-    ~md_runnerActive = false;
-    ~md_runnerTask.notNil.if({ ~md_runnerTask.stop; ~md_runnerTask = nil; });
-    ("[RUNNER] unlocked (wasActive=" ++ wasActive.asString ++ ")").postln;
-    true
+    if(~md_guard) { "[SAFE] manual unlock".postln };
+    ~md_guard = false;
+    ~md_guard_time = ~md_now.();
 };
 
-~md_addSafetyUnlock = {
-    SystemClock.sched(3.0, {
-        var playing;
-        playing = ~md_runnerTask.notNil and: { ~md_runnerTask.isPlaying ? false };
-        if(~md_runnerActive == true and: { playing == false }) {
-            "[RUNNER] safety unlock".postln;
-            ~md_runnerActive = false;
-            ~md_runnerTask = nil;
-        };
+~md_forceCreateWindow = {
+    AppClock.sched(0.0, {
+        "[RUN] force-create window".postln;
+        ~md_close_duplicate_windows.();
+        AppClock.sched(0.2, {
+            ~md_try_open_gui_window.();
+            AppClock.sched(0.35, { ~md_attach_probe_frame.(); ~md_frontWindow.(); nil });
+            nil
+        });
         nil
     });
-    true
 };
+
+/* =========================
+   boot + scenario one-button
+   ========================= */
 
 ~md_bootProbeScenario = {
-    var runnerTask, waitCount, maxWait, done;
-
-    if(~md_runnerActive == true) {
-        "[RUNNER] Already running — ignoring new request.".postln;
-        ^~md_runnerTask
+    var now_time = ~md_now.();
+    var guard_age = now_time - (~md_guard_time ? now_time);
+    if(~md_guard and: { guard_age > (~md_guard_timeout ? 10.0) }) {
+        "[SAFE] auto-unlock (stale)".postln; ~md_runnerUnlock.();
     };
-
-    ~md_runnerActive = true;
-    ~md_addSafetyUnlock.();
-
-    runnerTask = Task({
-        ~md_log.("Starting: reset → boot → probe → scenario");
-        ~md_resetSession.();
-        ~bootGuiV6.();
-
-        // Wait up to ~1.5s for ~gui and ~mpb (30 * 0.05)
-        waitCount = 0; maxWait = 30; done = false;
-        while({ done.not and: { waitCount < maxWait } }, {
-            if(~gui.notNil and: { ~mpb.notNil }) { done = true }{ 0.05.wait; waitCount = waitCount + 1 };
-        });
-
-        if(~mpb.isNil) { ~md_ensureMpbNow.() };
-
-        if(~gui.isNil or: { ~mpb.isNil }) {
-            "[RUNNER] Cannot proceed: ~gui or ~mpb missing. Try ~md_forceCreateWindow.();".warn;
-        }{
-            "[RUNNER] Probe…".postln;
-            ~probeGuiV3.();
-
-            0.3.wait;
-
-            "[RUNNER] Scenario (fast)…".postln;
-            ~scenario1v6_fast.();
-        };
-
-        AppClock.sched(0, { ~md_runnerActive = false; ~md_runnerTask = nil; nil });
+    if(~md_guard) { "[RUN] already running — ignoring".postln; ^nil };
+    ~md_guard = true; ~md_guard_time = now_time; ~md_run_token = (~md_run_token ? 0) + 1;
+    var token = ~md_run_token;
+    "[RUN] start token %".format(token).postln;
+    AppClock.sched((~md_guard_timeout ? 10.0), {
+        if(~md_guard and: { ~md_run_token == token }) { "[SAFE] auto-unlock (timeout)".postln; ~md_runnerUnlock.() };
+        nil
     });
-
-    ~md_runnerTask = runnerTask.start;  // SystemClock task
-    ~md_runnerTask
+    AppClock.sched(0.0, {
+        "[AC] ensure ~mpb".postln; ~md_ensure_mpb.();
+        "[AC] window build/find".postln;
+        ~md_find_or_create_gui_window.({
+            ~md_attach_probe_frame.();
+            ~md_frontWindow.();
+            if(~sc_fast_scenario1.notNil) {
+                "[RUN] starting Scenario 1".postln;
+                ~sc_fast_scenario1.({ "[RUN] Scenario 1 complete".postln; ~md_runnerUnlock.() });
+            }{
+                "[RUN] no Scenario 1; unlocking".postln; ~md_runnerUnlock.();
+            };
+            nil
+        }, {
+            "[RUN] window creation failed; unlocking".postln; ~md_runnerUnlock.();
+            nil
+        }, token);
+        nil
+    });
 };
 
-"Ready. After reboot, evaluate this file, then run: ~md_bootProbeScenario.();".postln;
-)
+/* fallback for ~refreshGuiFromMpb */
+if(~refreshGuiFromMpb.isNil) {
+    ~refreshGuiFromMpb = { |tag| "[GUI] refreshGuiFromMpb (fallback) — %".format(tag ? "no-tag").postln };
+    "[INFO] installed fallback ~refreshGuiFromMpb".postln;
+};
+
+"[INFO] Runner loaded. Ready.".postln;
+
+) // end of block
