@@ -1,182 +1,90 @@
+// testMagicDisplayGUI.scd newer
+
 (
-// TestMagicDisplayGUI.scd v0.2.4 — visual test harness (no server required)
-// Follows Martin's SC style: tilde vars, var-first, lowercase method names, no server.sync.
+// GUI-only harness with meters OFF to avoid server/SynthDef errors.
 
-~mdgReset = {
-    var keys;
-    keys = [\mdgTask, \mdgState, \applyCmd, \mdgShow, \runSequence,
-        \startScenario1, \startScenario2, \startScenario3, \stopScenarios];
-    keys.do { |key| thisEnvironment.removeAt(key) };
+~bootGui = {
+    var guiObj, board;
+
+    // Create GUI (window creation is scheduled on AppClock in initGui)
+    guiObj = MagicDisplayGUI.new;
+
+    // Disable meters *immediately* so the scheduled init won't try to attach to the server
+    guiObj.enableMeters(false);
+
+    // Create pedalboard and attach display
+    board = MagicPedalboardNew(guiObj);
+
+    ~gui = guiObj;
+    ~mpb = board;
+
+    // After the window has had time to build, draw the lists
+    AppClock.sched(0.2, {
+        ~mpb.printChains;   // drives showChainsDetailed → populates CURRENT/NEXT columns
+        nil
+    });
+
+    "GUI booted (meters disabled). The window will appear and lists will render shortly.".postln;
 };
 
-~mdgInit = {
-    var state;
-
-    // --- state model (A/B chains with active/edit roles)
-    state = (
-        chainA: [\guitar, \destination],
-        chainB: [\guitar, \destination],
-        active: \chainA,     // which chain is currently "active" (shown as ACTIVE)
-        edit: \chainB        // which chain is currently being edited (NEXT)
-    );
-    ~mdgState = state;
-
-    // --- one unified 'show' that uses GUI if present, else console
-    ~mdgShow = { |sourceName, commandArr, chainArr|
-        var classObj, gui;
-        classObj = \MagicDisplayGUI.asClass;  // safe: resolves to nil if class not compiled
-        if(classObj.notNil) {
-            gui = classObj.instance;
-            if(gui.notNil and: { gui.respondsTo(\showMutation) }) {
-                gui.showMutation(sourceName, commandArr, chainArr);
-            }{
-                ("MagicDisplayGUI found but showMutation is missing → " ++
-                    [sourceName, commandArr, chainArr]).postln;
-            };
-        }{
-            ("[Console only] " ++ sourceName ++ " → " ++
-                commandArr.asString ++ " | chain: " ++ chainArr.asString).postln;
-        };
-    };
-
-    // --- simple chain simulator for GUI-driving (no audio, just lists)
-    ~applyCmd = { |commandArr|
-        var first, arg1, arg2;
-        var st, activeSym, editSym, editChain;
-
-        st = ~mdgState;
-        first = commandArr[0];
-        arg1 = commandArr[1];
-        arg2 = commandArr[2];
-
-        activeSym = st[\active];
-        editSym   = st[\edit];
-        editChain = st[editSym];
-
-        if(first == \switchChain) {
-            st[\active] = editSym;
-            st[\edit]   = activeSym;
-        }{
-            if(first == \addProc) {
-                st[editSym] = editChain ++ [arg1];
-            }{
-                if(first == \removeProc) {
-                    st[editSym] = editChain.reject { |procSym| procSym == arg1 };
-                }{
-                    if(first == \resetChain) {
-                        st[editSym] = [\guitar, \destination];
-                    }{
-                        // bypassProc or unknown: no structural change, still show mutation
-                        nil;
-                    };
-                };
-            };
-        };
-
-        // Return the *currently active* chain for display after this mutation
-        st[ st[\active] ];
-    };
-
-    // --- runs a sequence of commands against the simulator and the GUI
-    ~runSequence = { |sourceName, commands, stepSeconds=0.8|
-        var routine;
-        routine = Routine {
-            var chainAfter, cmdIndex, cmd;
-            cmdIndex = 0;
-            commands.do { |commandItem|
-                cmdIndex = cmdIndex + 1;
-                cmd = commandItem;
-                chainAfter = ~applyCmd.(cmd);
-                ~mdgShow.(sourceName, cmd, chainAfter);
-                stepSeconds.wait;
-            };
-        };
-        ~mdgTask.notNil.if { ~mdgTask.stop };
-        ~mdgTask = Task(routine, AppClock).play;
-    };
-
-    // --- Scenario 1: basic happy path (A/B edit + switch + reset)
-    ~startScenario1 = {
-        var commands;
-        commands = [
-            [\switchChain, \chainB],
-            [\addProc, \flanger],
-            [\bypassProc, \flanger, true],
-            [\addProc, \delay],
-            [\switchChain, \chainA],
-            [\resetChain]
-        ];
-
-        ~mdgState[\chainA] = [\guitar, \destination];
-        ~mdgState[\chainB] = [\guitar, \destination];
-        ~mdgState[\active] = \chainA;
-        ~mdgState[\edit]   = \chainB;
-
-        ~runSequence.("test", commands, 0.8);
-    };
-
-    // --- Scenario 2: rapid updates / longer chain stress
-    ~startScenario2 = {
-        var commands;
-        commands = [
-            [\switchChain, \chainB],
-            [\addProc, \chorus],
-            [\addProc, \reverb],
-            [\addProc, \tremolo],
-            [\removeProc, \chorus],
-            [\addProc, \phaser],
-            [\switchChain, \chainA],
-            [\resetChain]
-        ];
-
-        ~mdgState[\chainA] = [\guitar, \destination];
-        ~mdgState[\chainB] = [\guitar, \destination];
-        ~mdgState[\active] = \chainA;
-        ~mdgState[\edit]   = \chainB;
-
-        ~runSequence.("stress", commands, 0.2);
-    };
-
-    // --- Scenario 3: edge cases (unknown command, no-op remove, empty cmd)
-    ~startScenario3 = {
-        var commands;
-        commands = [
-            [\switchChain, \chainB],
-            [\unknownCommand, \foo],
-            [\addProc, \bitcrusher],
-            [\bypassProc, \bitcrusher, false],
-            [\removeProc, \nonexistent],
-            [\switchChain, \chainA],
-            [\resetChain],
-            []
-        ];
-
-        ~mdgState[\chainA] = [\guitar, \destination];
-        ~mdgState[\chainB] = [\guitar, \destination];
-        ~mdgState[\active] = \chainA;
-        ~mdgState[\edit]   = \chainB;
-
-        ~runSequence.("edge", commands, 0.6);
-    };
-
-    // --- stop/cleanup (also tries to close the GUI if it supports .close)
-    ~stopScenarios = {
-        var classObj, gui;
-        ~mdgTask.notNil.if { ~mdgTask.stop; ~mdgTask = nil; };
-        classObj = \MagicDisplayGUI.asClass;
-        if(classObj.notNil) {
-            gui = classObj.instance;
-            if(gui.notNil and: { gui.respondsTo(\close) }) {
-                gui.close;
-            };
-        };
-        "Stopped scenarios and attempted to close MagicDisplayGUI (if present).".postln;
-    };
-
-    "MagicDisplayGUI test harness ready. Try ~startScenario1.(), ~startScenario2.(), or ~startScenario3.().".postln;
+~stopScenarios = {
+    var t;
+    t = ~mdgTask;
+    if(t.notNil) { t.stop; ~mdgTask = nil; };
+    "Stopped scenario task (if any).".postln;
 };
 
-// Initialize cleanly
-~mdgReset.();
-~mdgInit.();
+// Scenario 1: slow, clear updates
+~scenario1 = {
+    var routine, steps, waitSeconds;
+
+    if(~mpb.isNil) { "Run ~bootGui.() first.".warn; ^nil };
+
+    waitSeconds = 0.8;
+
+    steps = [
+        { ~mpb.printChains },
+        { ~mpb.add(\flanger); ~mpb.printChains },
+        { ~mpb.bypass(\flanger, true); ~mpb.printChains },
+        { ~mpb.add(\delay); ~mpb.printChains },
+        { ~mpb.clearChain; ~mpb.printChains }
+    ];
+
+    routine = Routine {
+        var i, n; i = 0; n = steps.size;
+        while({ i < n }, { steps[i].value; i = i + 1; waitSeconds.wait; });
+    };
+
+    ~stopScenarios.();
+    ~mdgTask = Task(routine, AppClock).play;
+    ~mdgTask
+};
+
+// Scenario 2: faster stress updates
+~scenario2 = {
+    var routine, steps, waitSeconds;
+
+    if(~mpb.isNil) { "Run ~bootGui.() first.".warn; ^nil };
+
+    waitSeconds = 0.25;
+
+    steps = [
+        { ~mpb.printChains },
+        { ~mpb.add(\chorus); ~mpb.printChains },
+        { ~mpb.add(\reverb); ~mpb.printChains },
+        { ~mpb.add(\tremolo); ~mpb.printChains },
+        { ~mpb.removeAt(2); ~mpb.printChains },
+        { ~mpb.add(\phaser); ~mpb.printChains },
+        { ~mpb.clearChain; ~mpb.printChains }
+    ];
+
+    routine = Routine {
+        var i, n; i = 0; n = steps.size;
+        while({ i < n }, { steps[i].value; i = i + 1; waitSeconds.wait; });
+    };
+
+    ~stopScenarios.();
+    ~mdgTask = Task(routine, AppClock).play;
+    ~mdgTask
+};
 )
