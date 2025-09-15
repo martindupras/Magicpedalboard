@@ -1,27 +1,30 @@
-/* Utils_MagicDisplayGUI_Checks.scd
-   Tiny helpers for quick inspection during testing.
-   Style as per project conventions.
-*/
-
 (
-// Count & list windows (runs on AppClock safely)
-~md_checkWindows = {
-    AppClock.sched(0, {
-        var wins;
-        wins = Window.allWindows ? [];
-        ("[CHECK] window count = " ++ wins.size).postln;
-        wins.do({ |w, idx| ("[CHECK] w" ++ idx ++ " title=" ++ w.name.asString).postln });
+// =========================
+// Utils_MagicDisplayGUI_Checks.scd
+// =========================
+
+~md_checkEnv = {
+    var gui_present, queue_ok, setter_ok, atput_ok, win_count, win_titles;
+    gui_present = ~gui.notNil;
+    queue_ok = gui_present and: { ~gui.respondsTo(\queueUi) };
+    setter_ok = gui_present and: { ~gui.respondsTo(\queueUi_) };
+    atput_ok = gui_present and: { ~gui.respondsTo(\atPut) };
+
+    win_count = (~md_get_gui_windows.notNil).if({ ~md_get_gui_windows.().size }, { 0 });
+    win_titles = (win_count > 0).if({
+        ~md_get_gui_windows.().collect({ |window_item| window_item.name.asString })
+    }, { [] });
+
+    "[ENV] mpb:% gui:% queueUi:% queueUi_:% atPut:% windows:% titles:%"
+        .format(~mpb.notNil, gui_present, queue_ok, setter_ok, atput_ok, win_count, win_titles)
+        .postln;
+};
+
+~md_appclock_ping = {
+    AppClock.sched(0.0, {
+        "[AC] ping ok @ % s".format(Main.elapsedTime.round(0.001)).postln;
         nil
     });
 };
 
-// Confirm we have GUI + pedalboard
-~md_checkEnv = {
-    var hasGui, hasMpb;
-    hasGui = ~gui.notNil; hasMpb = ~mpb.notNil;
-    ("[CHECK] has ~gui = " ++ hasGui.asString ++ ", has ~mpb = " ++ hasMpb.asString).postln;
-    if(hasGui and: { ~gui.respondsTo(\window) }) {
-        ("[CHECK] window exists = " ++ (~gui.window.notNil).asString).postln;
-    };
-};
-)
+) // end block
