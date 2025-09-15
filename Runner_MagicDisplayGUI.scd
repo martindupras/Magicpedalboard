@@ -1,45 +1,87 @@
-/* Runner_MagicDisplayGUI.scd v0.6.1
-   Purpose: Deterministic, single-window GUI boot → probe → scenario (fast) runner.
+/* Runner_MagicDisplayGUI.scd
+   Purpose: Deterministic, single-window GUI boot → probe → scenario (fast).
    Self-contained: no watchers, no queueUi patching, all GUI ops on AppClock.
    Style: tilde vars, var-first, lowercase names, no server.sync, no single-letter locals.
 */
 
 (
 // ---------------------------
-// 0) utilities + boot token
+// 0) utilities + run/boot state
 // ---------------------------
 ~md_bootToken = (~md_bootToken ? 0);
+~md_runnerActive = (~md_runnerActive ? false);
+~md_runnerTask = (~md_runnerTask ? nil);
+
 ~md_log = { |messageString| ("[RUNNER] " ++ messageString).postln };
 
 // ---------------------------
-// 1) minimal reset (no closing)
+// 1) window liveness + quick checks
+// ---------------------------
+~md_isWindowAlive = {
+    var winObj, viewObj, wasRemoved, isClosed, ok;
+    if(~gui.isNil) { ^false };
+    winObj = ~gui.tryPerform(\window);
+    if(winObj.isNil) { ^false };
+    viewObj = winObj.tryPerform(\view);
+    wasRemoved = viewObj.tryPerform(\wasRemoved);
+    if(wasRemoved.isNil) { wasRemoved = false };
+    isClosed = winObj.tryPerform(\isClosed);
+    if(isClosed.isNil) { isClosed = false };
+    ok = (wasRemoved == false) and: (isClosed == false);
+    ok
+};
+
+~md_checkWindows = {
+    AppClock.sched(0, {
+        var wins;
+        wins = Window.allWindows ? [];
+        ("[CHECK] window count = " ++ wins.size).postln;
+        wins.do({ |w, idx| ("[CHECK] w" ++ idx ++ " title=" ++ w.name.asString).postln });
+        nil
+    });
+};
+
+~md_checkEnv = {
+    var hasGui, hasMpb;
+    hasGui = ~gui.notNil; hasMpb = ~mpb.notNil;
+    ("[CHECK] has ~gui = " ++ hasGui.asString ++ ", has ~mpb = " ++ hasMpb.asString).postln;
+    if(hasGui and: { ~gui.respondsTo(\window) }) {
+        ("[CHECK] window exists = " ++ (~gui.window.notNil).asString).postln;
+    };
+};
+
+// ---------------------------
+// 2) minimal reset (no programmatic window close)
 // ---------------------------
 ~md_resetSession = {
-    var hadTask, hadBootTask;
+    var hadTask, hadBootTask, alive;
     hadTask = ~mdgTask.notNil;
     hadBootTask = ~bootTask.notNil;
 
     hadTask.if({ ~mdgTask.stop; ~mdgTask = nil; });
     hadBootTask.if({ ~bootTask.stop; ~bootTask = nil; });
 
-    // Do not close windows here; avoid Qt races. Just clear references we own.
+    // If the window is dead, force fresh next time.
+    alive = ~md_isWindowAlive.();
+    if(alive.not) { ~gui = nil };
+
+    // Always clear pedalboard refs; runner guarantees rebuild.
     ~mpb = nil;
     ~magicDisplay = nil;
 
-    ~md_log.("Reset: tasks stopped; references cleared.");
+    "[RUNNER] Reset: tasks stopped; references cleared."
+        ++ (alive.not.if({ " (~gui cleared: window not alive)" }, { "" }))
+        .postln;
 };
 
 // -------------------------------------------
-// 2) ensure pedalboard exists immediately
+// 3) ensure pedalboard exists immediately
 // -------------------------------------------
 ~md_ensureMpbNow = {
     var created;
     created = false;
 
-    if(~gui.isNil) {
-        "[ENSURE] No ~gui yet; cannot build ~mpb.".warn;
-        ^false
-    };
+    if(~gui.isNil) { "[ENSURE] No ~gui yet; cannot build ~mpb.".warn; ^false };
 
     if(~mpb.isNil) {
         ~mpb = MagicPedalboardNew(~gui);
@@ -51,7 +93,7 @@
 };
 
 // -------------------------------------------
-// 3) single, idempotent boot on AppClock only
+// 4) single, idempotent boot on AppClock only
 // -------------------------------------------
 ~bootGuiV6 = {
     var myToken;
@@ -63,26 +105,24 @@
     "Booting GUI (meters disabled). Waiting for window…".postln;
 
     AppClock.sched(0, {
-        var existingWin, guiObj, board;
+        var winOk, existingWin, guiObj, board;
 
-        if(~md_bootToken != myToken) { ^nil }; // newer boot superseded us
+        if(~md_bootToken != myToken) { ^nil }; // stale invocation
 
-        // Reuse existing window if available
-        if(~gui.notNil) {
+        winOk = ~md_isWindowAlive.();
+        if(winOk) {
             existingWin = ~gui.tryPerform(\window);
-            if(existingWin.notNil) {
-                "Window found — reusing and fronting.".postln;
+            "Window found — reusing and fronting.".postln;
 
-                if(~mpb.isNil) {
-                    board = MagicPedalboardNew(~gui);
-                    ~mpb = board;
-                    "[ENSURE] Reuse path created ~mpb.".postln;
-                };
-
-                existingWin.front;
-                if(~refreshView.notNil) { ~refreshView.("boot (reuse)") };
-                ^nil
+            if(~mpb.isNil) {
+                board = MagicPedalboardNew(~gui);
+                ~mpb = board;
+                "[ENSURE] Reuse path created ~mpb.".postln;
             };
+
+            existingWin.front;
+            if(~refreshView.notNil) { ~refreshView.("boot (reuse)") };
+            ^nil
         };
 
         // Fresh create
@@ -101,8 +141,6 @@
             if(winReady.notNil) {
                 "Window ready — fronting and drawing columns.".postln;
                 winReady.front;
-            }{
-                "Window not yet available; will front on next GUI call.".postln;
             };
             if(~refreshView.notNil) { ~refreshView.("boot") };
             nil
@@ -113,7 +151,7 @@
 };
 
 // ------------------------------------------------------
-// 4) fallbacks if monolithic helpers aren’t loaded
+// 5) fallbacks if monolithic helpers aren’t loaded
 // ------------------------------------------------------
 ~refreshGuiFromMpb = ~refreshGuiFromMpb ? {
     var curr, nxt, bA, bB, eA, eB;
@@ -150,8 +188,7 @@
 };
 
 // ------------------------------------------------------
-// 5) fast scenario: each step runs on AppClock directly
-//    (scenario1 fast included here for one-button run)
+// 6) fast scenario: each step runs on AppClock directly
 // ------------------------------------------------------
 ~scenario1v6_fast = {
     var paceSeconds, steps, controllerRoutine, totalSteps, stepIndex;
@@ -183,12 +220,20 @@
 };
 
 // ------------------------------------------------------
-// 6) single-button: reset → boot → probe → fast scenario
+// 7) single-button: reset → boot → probe → fast scenario
+//    with RE-ENTRANCY GUARD
 // ------------------------------------------------------
 ~md_bootProbeScenario = {
-    var runnerTask;
+    var runnerTask, waitCount, maxWait, done;
+
+    if(~md_runnerActive == true) {
+        "[RUNNER] Already running — ignoring new request.".postln;
+        ^~md_runnerTask
+    };
+
+    ~md_runnerActive = true;
+
     runnerTask = Task({
-        var waitCount, maxWait, done;
         ~md_log.("Starting: reset → boot → probe → scenario");
         ~md_resetSession.();
         ~bootGuiV6.();
@@ -200,131 +245,144 @@
         });
 
         if(~mpb.isNil) { ~md_ensureMpbNow.() };
-        if(~gui.isNil or: { ~mpb.isNil }) { "[RUNNER] Cannot proceed: ~gui or ~mpb missing.".warn; ^nil };
+        if(~gui.isNil or: { ~mpb.isNil }) {
+            "[RUNNER] Cannot proceed: ~gui or ~mpb missing.".warn;
+            // fall through to clear the active flag
+        }{
+            "[RUNNER] Probe…".postln;
+            ~probeGuiV3.();
 
-        "[RUNNER] Probe…".postln;
-        ~probeGuiV3.();
+            0.3.wait;
 
-        0.3.wait;
-
-        "[RUNNER] Scenario (fast)…".postln;
-        ~mpb.isNil.if({ ~md_ensureMpbNow.() });
-        ~scenario1v6_fast.();
-    });
-    runnerTask.start;
-    runnerTask
-};
-
-// optional: quick window inspector
-~md_checkWindows = {
-    AppClock.sched(0, {
-        var wins;
-        wins = Window.allWindows ? [];
-        ("[CHECK] window count = " ++ wins.size).postln;
-        wins.do({ |w, idx| ("[CHECK] w" ++ idx ++ " title=" ++ w.name.asString).postln });
-        nil
-    });
-};
-
-"Ready. After reboot, evaluate this file, then run: ~md_bootProbeScenario.();".postln;
-
-
-
-
-// 1) Is the current window actually alive?
-~md_isWindowAlive = {
-    var winObj, wasRemoved, isClosed, viewObj, ok;
-    if(~gui.isNil) { ^false };
-    winObj = ~gui.tryPerform(\window);
-    if(winObj.isNil) { ^false };
-
-    // Try to detect a removed/closed Qt view in a defensive way
-    viewObj = winObj.tryPerform(\view);
-    wasRemoved = viewObj.tryPerform(\wasRemoved);
-    if(wasRemoved.isNil) { wasRemoved = false };
-
-    isClosed = winObj.tryPerform(\isClosed);  // may be nil on older builds
-    if(isClosed.isNil) { isClosed = false };
-
-    ok = (wasRemoved == false) and: (isClosed == false);
-    ok
-};
-
-// 2) Make reset “smart”: if window is dead, clear ~gui so next boot is fresh
-~md_resetSession = {
-    var hadTask, hadBootTask, alive;
-    hadTask = ~mdgTask.notNil;
-    hadBootTask = ~bootTask.notNil;
-
-    hadTask.if({ ~mdgTask.stop; ~mdgTask = nil; });
-    hadBootTask.if({ ~bootTask.stop; ~bootTask = nil; });
-
-    alive = ~md_isWindowAlive.();
-    if(alive.not) { ~gui = nil };  // forces fresh create next time
-
-    ~mpb = nil;
-    ~magicDisplay = nil;
-
-    "[RUNNER] Reset: tasks stopped; references cleared."
-    ++ (alive.not.if({ " (~gui cleared: window not alive)" }, { "" })).postln;
-};
-
-// 3) Harden ~bootGuiV6: reuse only if the window is alive; else fresh create
-~bootGuiV6 = {
-    var myToken;
-    ~md_resetSession.();
-
-    ~md_bootToken = (~md_bootToken ? 0) + 1;
-    myToken = ~md_bootToken;
-
-    "Booting GUI (meters disabled). Waiting for window…".postln;
-
-    AppClock.sched(0, {
-        var winOk, existingWin, guiObj, board;
-
-        if(~md_bootToken != myToken) { ^nil };
-
-        winOk = ~md_isWindowAlive.();
-        if(winOk) {
-            existingWin = ~gui.tryPerform(\window);
-            "Window found — reusing and fronting.".postln;
-
-            if(~mpb.isNil) {
-                board = MagicPedalboardNew(~gui);
-                ~mpb = board;
-                "[ENSURE] Reuse path created ~mpb.".postln;
-            };
-
-            existingWin.front;
-            if(~refreshView.notNil) { ~refreshView.("boot (reuse)") };
-            ^nil
+            "[RUNNER] Scenario (fast)…".postln;
+            ~scenario1v6_fast.();
         };
 
-        // Fresh create
+        // Always clear active flag at end
+        AppClock.sched(0, { ~md_runnerActive = false; nil });
+    });
+
+    ~md_runnerTask = runnerTask.start;  // start on SystemClock
+    ~md_runnerTask
+};
+
+// --- 1) Manual unlock if the guard got stuck ---
+~md_runnerUnlock = {
+    var wasActive;
+    wasActive = ~md_runnerActive ? false;
+    ~md_runnerActive = false;
+    ~md_runnerTask.notNil.if({ ~md_runnerTask.stop; ~md_runnerTask = nil; });
+    ("[RUNNER] unlocked (wasActive=" ++ wasActive.asString ++ ")").postln;
+    true
+};
+
+// --- 2) Force-create a fresh GUI + MPB on AppClock (no reuse logic) ---
+~md_forceCreateWindow = {
+    AppClock.sched(0, {
+        var guiObj, board, winReady;
+        "[FORCE] Creating MagicDisplayGUI…".postln;
         guiObj = MagicDisplayGUI.new;
         guiObj.enableMeters(false);
         ~gui = guiObj;
 
+        "[FORCE] Creating MagicPedalboardNew…".postln;
         board = MagicPedalboardNew(guiObj);
         ~mpb = board;
-        "[ENSURE] Fresh path created ~mpb.".postln;
 
-        AppClock.sched(0.05, {
-            var winReady;
-            if(~md_bootToken != myToken) { ^nil };
+        AppClock.sched(0.1, {  // 0.1s to be extra safe
             winReady = ~gui.tryPerform(\window);
             if(winReady.notNil) {
-                "Window ready — fronting and drawing columns.".postln;
+                "[FORCE] Window ready — fronting.".postln;
+                winReady.alwaysOnTop_(true);
                 winReady.front;
+                AppClock.sched(0.2, { winReady.alwaysOnTop_(false); nil });
             }{
-                "Window not yet available; will front on next GUI call.".postln;
+                "[FORCE] Window not yet ready.".postln;
             };
-            if(~refreshView.notNil) { ~refreshView.("boot") };
+            if(~refreshView.notNil) { ~refreshView.("force-create") };
             nil
         });
-
         nil
     });
 };
-)
 
+// --- 3) Front the window robustly (on AppClock) ---
+~md_frontWindow = {
+    AppClock.sched(0, {
+        var win;
+        win = ~gui.tryPerform(\window);
+        if(win.notNil) {
+            win.alwaysOnTop_(true);
+            win.front;
+            AppClock.sched(0.2, { win.alwaysOnTop_(false); nil });
+        }{
+            "[FRONT] No window to front.".postln;
+        };
+        nil
+    });
+};
+
+// --- 4) Add a safety auto-unlock in the runner (does not disturb active runs) ---
+~md_addSafetyUnlock = {
+    // If the runner is marked active but the task isn't playing after 3s, unlock.
+    SystemClock.sched(3.0, {
+        var playing;
+        playing = ~md_runnerTask.notNil and: { ~md_runnerTask.isPlaying ? false };
+        if(~md_runnerActive == true and: { playing == false }) {
+            "[RUNNER] safety unlock".postln;
+            ~md_runnerActive = false;
+            ~md_runnerTask = nil;
+        };
+        nil
+    });
+    true
+};
+
+// Re-wrap ~md_bootProbeScenario to include the safety unlock call
+~md_bootProbeScenario = {
+    var runnerTask, waitCount, maxWait, done;
+
+    if(~md_runnerActive == true) {
+        "[RUNNER] Already running — ignoring new request.".postln;
+        ^~md_runnerTask
+    };
+
+    ~md_runnerActive = true;
+    ~md_addSafetyUnlock.();  // arm the safety valve each run
+
+    runnerTask = Task({
+        ~md_log.("Starting: reset → boot → probe → scenario");
+        ~md_resetSession.();
+        ~bootGuiV6.();
+
+        // Wait up to ~1.5s for ~gui and ~mpb (30 * 0.05)
+        waitCount = 0; maxWait = 30; done = false;
+        while({ done.not and: { waitCount < maxWait } }, {
+            if(~gui.notNil and: { ~mpb.notNil }) { done = true }{ 0.05.wait; waitCount = waitCount + 1 };
+        });
+
+        if(~mpb.isNil) { ~md_ensureMpbNow.() };
+
+        if(~gui.isNil or: { ~mpb.isNil }) {
+            "[RUNNER] Cannot proceed: ~gui or ~mpb missing. Try ~md_forceCreateWindow.();".warn;
+        }{
+            "[RUNNER] Probe…".postln;
+            ~probeGuiV3.();
+
+            0.3.wait;
+
+            "[RUNNER] Scenario (fast)…".postln;
+            ~scenario1v6_fast.();
+        };
+
+        // Always clear active flag at end
+        AppClock.sched(0, { ~md_runnerActive = false; ~md_runnerTask = nil; nil });
+    });
+
+    ~md_runnerTask = runnerTask.start;  // SystemClock
+    ~md_runnerTask
+};
+
+
+"Ready. After reboot, evaluate this file, then run: ~md_bootProbeScenario.();".postln;
+)
