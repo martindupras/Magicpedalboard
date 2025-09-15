@@ -1,16 +1,24 @@
-/* Test_MagicDisplayGUI_BootAndScenarios.scd  v0.3
-   Purpose: Robustly boot MagicDisplayGUI (meters OFF), wait for its window,
-            and drive visible updates with scenarios that call showChainsDetailed.
+/* Test_MagicDisplayGUI_BootAndScenarios.scd v0.4
+   Purpose: Deterministic boot (meters OFF), wait for window, then scenarios that
+            clearly post progress AND force GUI redraws every step.
 
    Style: tilde vars, var-first, lowercase names, no server.sync, no single-letter locals.
 */
 
 (
-// --- helpers: direct draw + command label ------------------------------------
+// ---------- shared helpers ----------------------------------------------------
+
+~postState = { |labelString|
+    var curr, nxt;
+    curr = ~mpb.tryPerform(\currentChain);
+    nxt  = ~mpb.tryPerform(\nextChain);
+    ("[STATE] " ++ labelString ++ " → current=" ++ curr.asString
+        ++ " | next=" ++ nxt.asString).postln;
+};
 
 ~drawOnce = {
     var curr, nxt, bypassA, bypassB, effA, effB;
-    if(~gui.isNil or: { ~mpb.isNil }) { "Run ~bootGuiV3.() first.".warn; ^nil };
+    if(~gui.isNil or: { ~mpb.isNil }) { "Run ~bootGuiV4.() first.".warn; ^nil };
 
     curr    = ~mpb.currentChain;
     nxt     = ~mpb.nextChain;
@@ -19,36 +27,37 @@
     effA    = ~mpb.effectiveCurrent;
     effB    = ~mpb.effectiveNext;
 
-    // This is the method in your GUI that actually updates the list widgets.
+    // GUI method that actually updates the lists/labels
     ~gui.showChainsDetailed(curr, nxt, bypassA, bypassB, effA, effB);
 };
 
-~showCmd = { |textString|
-    if(~gui.notNil and: { ~gui.respondsTo(\showExpectation) }) {
-        ~gui.showExpectation(textString.asString, 0);  // update the "Command:" area, no countdown
-    };
+~refreshView = { |labelString|
+    ~postState.(labelString);
+    // Console view via MPB (also calls showChainsDetailed under the hood)
+    ~mpb.printChains;
+    // Explicit GUI redraw (belt-and-braces)
+    ~drawOnce.();
 };
 
-// --- robust boot: build GUI, link to MPB, wait for window, then first draw ----
+// ---------- robust boot: wait for window, then first draw --------------------
 
-~bootGuiV3 = {
+~bootGuiV4 = {
     var guiObj, board, maxPollCount, pollDelaySeconds, routine;
 
-    // Optional: stop any previous scenario/boot task
+    // stop any previous tasks
     ~mdgTask.notNil.if { ~mdgTask.stop; ~mdgTask = nil };
     ~bootTask.notNil.if { ~bootTask.stop; ~bootTask = nil };
 
-    // Create GUI instance and disable meters immediately (to avoid server dependency)
+    // create GUI and disable meters (avoid server dependency)
     guiObj = MagicDisplayGUI.new;
     guiObj.enableMeters(false);
 
-    // Create pedalboard and attach the display
+    // create pedalboard and attach display
     board = MagicPedalboardNew(guiObj);
-
     ~gui = guiObj;
     ~mpb = board;
 
-    // Poll until the GUI window exists, then bring it front and draw
+    // poll for the window (it is built asynchronously on AppClock)
     maxPollCount = 200;          // up to ~10 seconds
     pollDelaySeconds = 0.05;
 
@@ -56,24 +65,24 @@
         var pollCount;
         pollCount = 0;
 
-        // wait for the GUI to actually construct its Window in initGui (AppClock.sched)
         while({ (~gui.window.isNil) and: { pollCount < maxPollCount } }, {
             pollCount = pollCount + 1;
-            pollDelaySeconds.wait;
+            pollDelaySeconds.wait;      // SystemClock here; avoids AppClock contention
         });
 
         defer({
             if(~gui.window.notNil) {
+                "Window ready — fronting and drawing columns.".postln;
                 ~gui.window.front;
+            }{
+                "Window did not appear in time (10 s).".warn;
             };
-            // First visible draw of CURRENT / NEXT
-            ~drawOnce.();
+            ~refreshView.("boot");
         });
     };
 
-    ~bootTask = Task(routine, AppClock).play;
-
-    "Booting GUI (meters disabled). Waiting for window, then painting columns…".postln;
+    ~bootTask = Task(routine, SystemClock).play; // use SystemClock for the polling loop
+    "Booting GUI (meters disabled). Waiting for window…".postln;
 };
 
 // bring GUI to front later if needed
@@ -89,27 +98,41 @@
     "Stopped scenario task (if any).".postln;
 };
 
-// --- Scenario 1: clear cadence, visible steps --------------------------------
+// ---------- Scenarios (run on SystemClock, post step labels) -----------------
 
-~scenario1 = {
-    var routine, steps, waitSeconds;
+~scenario1v4 = {
+    var routine, waitSeconds, steps, totalSteps;
 
-    if(~mpb.isNil or: { ~gui.isNil }) { "Run ~bootGuiV3.() first.".warn; ^nil };
+    if(~mpb.isNil or: { ~gui.isNil }) { "Run ~bootGuiV4.() first.".warn; ^nil };
 
     waitSeconds = 0.8;
 
     steps = [
-        { ~showCmd.("Init"); ~drawOnce.() },
-        { ~showCmd.("add flanger"); ~mpb.add(\flanger); ~drawOnce.() },
-        { ~showCmd.("bypass flanger → true"); ~mpb.bypass(\flanger, true); ~drawOnce.() },
-        { ~showCmd.("add delay"); ~mpb.add(\delay); ~drawOnce.() },
-        { ~showCmd.("clear NEXT"); ~mpb.clearChain; ~drawOnce.() }
+        { "[SC1] init".postln; ~refreshView.("SC1/init") },
+
+        { "[SC1] add flanger".postln;
+          ~mpb.add(\flanger);
+          ~refreshView.("SC1/add flanger") },
+
+        { "[SC1] bypass flanger → true".postln;
+          ~mpb.bypass(\flanger, true);
+          ~refreshView.("SC1/bypass flanger true") },
+
+        { "[SC1] add delay".postln;
+          ~mpb.add(\delay);
+          ~refreshView.("SC1/add delay") },
+
+        { "[SC1] clear NEXT".postln;
+          ~mpb.clearChain;
+          ~refreshView.("SC1/clear NEXT") }
     ];
 
+    totalSteps = steps.size;
+
     routine = Routine {
-        var stepIndex, stepCount;
-        stepIndex = 0; stepCount = steps.size;
-        while({ stepIndex < stepCount }, {
+        var stepIndex;
+        stepIndex = 0;
+        while({ stepIndex < totalSteps }, {
             steps[stepIndex].value;
             stepIndex = stepIndex + 1;
             waitSeconds.wait;
@@ -117,33 +140,33 @@
     };
 
     ~stopScenarios.();
-    ~mdgTask = Task(routine, AppClock).play;
+    ~mdgTask = Task(routine, SystemClock).play;   // SystemClock: robust in headless/server-off
     ~mdgTask
 };
 
-// --- Scenario 2: faster stress ------------------------------------------------
+~scenario2v4 = {
+    var routine, waitSeconds, steps, totalSteps;
 
-~scenario2 = {
-    var routine, steps, waitSeconds;
-
-    if(~mpb.isNil or: { ~gui.isNil }) { "Run ~bootGuiV3.() first.".warn; ^nil };
+    if(~mpb.isNil or: { ~gui.isNil }) { "Run ~bootGuiV4.() first.".warn; ^nil };
 
     waitSeconds = 0.25;
 
     steps = [
-        { ~showCmd.("Init"); ~drawOnce.() },
-        { ~showCmd.("add chorus");  ~mpb.add(\chorus);  ~drawOnce.() },
-        { ~showCmd.("add reverb");  ~mpb.add(\reverb);  ~drawOnce.() },
-        { ~showCmd.("add tremolo"); ~mpb.add(\tremolo); ~drawOnce.() },
-        { ~showCmd.("removeAt 2");  ~mpb.removeAt(2);   ~drawOnce.() },
-        { ~showCmd.("add phaser");  ~mpb.add(\phaser);  ~drawOnce.() },
-        { ~showCmd.("clear NEXT");  ~mpb.clearChain;    ~drawOnce.() }
+        { "[SC2] init".postln; ~refreshView.("SC2/init") },
+        { "[SC2] add chorus".postln;  ~mpb.add(\chorus);  ~refreshView.("SC2/add chorus") },
+        { "[SC2] add reverb".postln;  ~mpb.add(\reverb);  ~refreshView.("SC2/add reverb") },
+        { "[SC2] add tremolo".postln; ~mpb.add(\tremolo); ~refreshView.("SC2/add tremolo") },
+        { "[SC2] removeAt 2".postln;  ~mpb.removeAt(2);   ~refreshView.("SC2/removeAt 2") },
+        { "[SC2] add phaser".postln;  ~mpb.add(\phaser);  ~refreshView.("SC2/add phaser") },
+        { "[SC2] clear NEXT".postln;  ~mpb.clearChain;    ~refreshView.("SC2/clear NEXT") }
     ];
 
+    totalSteps = steps.size;
+
     routine = Routine {
-        var stepIndex, stepCount;
-        stepIndex = 0; stepCount = steps.size;
-        while({ stepIndex < stepCount }, {
+        var stepIndex;
+        stepIndex = 0;
+        while({ stepIndex < totalSteps }, {
             steps[stepIndex].value;
             stepIndex = stepIndex + 1;
             waitSeconds.wait;
@@ -151,31 +174,43 @@
     };
 
     ~stopScenarios.();
-    ~mdgTask = Task(routine, AppClock).play;
+    ~mdgTask = Task(routine, SystemClock).play;
     ~mdgTask
 };
 
-// --- Scenario 3: light edge-ish sequence (still structural-only) --------------
+~scenario3v4 = {
+    var routine, waitSeconds, steps, totalSteps;
 
-~scenario3 = {
-    var routine, steps, waitSeconds;
-
-    if(~mpb.isNil or: { ~gui.isNil }) { "Run ~bootGuiV3.() first.".warn; ^nil };
+    if(~mpb.isNil or: { ~gui.isNil }) { "Run ~bootGuiV4.() first.".warn; ^nil };
 
     waitSeconds = 0.6;
 
     steps = [
-        { ~showCmd.("Init"); ~drawOnce.() },
-        { ~showCmd.("add bitcrusher"); ~mpb.add(\bitcrusher); ~drawOnce.() },
-        { ~showCmd.("bypass bitcrusher → false"); ~mpb.bypass(\bitcrusher, false); ~drawOnce.() },
-        { ~showCmd.("removeAt 1 (if exists)"); ~mpb.removeAt(1); ~drawOnce.() },
-        { ~showCmd.("clear NEXT"); ~mpb.clearChain; ~drawOnce.() }
+        { "[SC3] init".postln; ~refreshView.("SC3/init") },
+
+        { "[SC3] add bitcrusher".postln;
+          ~mpb.add(\bitcrusher);
+          ~refreshView.("SC3/add bitcrusher") },
+
+        { "[SC3] bypass bitcrusher → false".postln;
+          ~mpb.bypass(\bitcrusher, false);
+          ~refreshView.("SC3/bypass bitcrusher false") },
+
+        { "[SC3] removeAt 1 (if exists)".postln;
+          ~mpb.removeAt(1);
+          ~refreshView.("SC3/removeAt 1") },
+
+        { "[SC3] clear NEXT".postln;
+          ~mpb.clearChain;
+          ~refreshView.("SC3/clear NEXT") }
     ];
 
+    totalSteps = steps.size;
+
     routine = Routine {
-        var stepIndex, stepCount;
-        stepIndex = 0; stepCount = steps.size;
-        while({ stepIndex < stepCount }, {
+        var stepIndex;
+        stepIndex = 0;
+        while({ stepIndex < totalSteps }, {
             steps[stepIndex].value;
             stepIndex = stepIndex + 1;
             waitSeconds.wait;
@@ -183,28 +218,7 @@
     };
 
     ~stopScenarios.();
-    ~mdgTask = Task(routine, AppClock).play;
+    ~mdgTask = Task(routine, SystemClock).play;
     ~mdgTask
-};
-
-// --- optional: check that everything is wired as expected ---------------------
-
-~checkPlumbing = {
-    var guiOk, showDetailedOk, mpbOk, displayOk, curr, nxt;
-    guiOk = ~gui.notNil;
-    showDetailedOk = guiOk and: { ~gui.respondsTo(\showChainsDetailed) };
-    mpbOk = ~mpb.notNil;
-    displayOk = mpbOk and: { ~mpb.respondsTo(\display) } and: { ~mpb.display === ~gui };
-
-    curr = mpbOk.if { ~mpb.tryPerform(\currentChain) } { nil };
-    nxt  = mpbOk.if { ~mpb.tryPerform(\nextChain) } { nil };
-
-    "=== Plumbing ===".postln;
-    ["~gui exists:", guiOk].postln;
-    ["GUI showChainsDetailed:", showDetailedOk].postln;
-    ["~mpb exists:", mpbOk].postln;
-    ["mpb.display === ~gui:", displayOk].postln;
-    ["currentChain:", curr].postln;
-    ["nextChain:", nxt].postln;
 };
 )
