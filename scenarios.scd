@@ -6,37 +6,36 @@
 /////////////////////////////////
 // [0] Run this at the beginning
 (
-// Minimal processor bootstrap so the symbols exist.
-// Each processor reads from \in.ar and returns processed audio.
-// Keep it simple and neutral; you can swap these later.
+// Minimal processor bootstrap so the symbols exist (stereo-safe).
+// Each processor reads from \in.ar(2) to guarantee 2 channels.
 
 var defineProxy;
 
-// this is a wrapper that makes sure that any Ndef created is audio and two channels.
+// Wrapper that defines/overwrites an Ndef and ensures it's audio & 2ch.
 defineProxy = { arg key, func;
     var canRun;
     canRun = Server.default.serverRunning;
     if(canRun) {
         Server.default.bind({
-            Ndef(key, func); // define or overwrite
-            Ndef(key).ar(2); // 2 channels by default; matches your pedalboard default
+            Ndef(key, func);  // set function
+            Ndef(key).ar(2);  // ensure 2ch bus
         });
     } {
         "Server not running; start the server first.".postln;
     };
 };
 
-// Source tap (ts0) – your default source
+// Source tap (ts0) – default source (stereo)
 defineProxy.(\ts0, {
     var inputSignal;
-    inputSignal = SoundIn.ar((0..1)); // stereo in
-    inputSignal * 1.0
+    inputSignal = SoundIn.ar([0, 1]);  // explicit L/R
+    inputSignal
 });
 
-// Simple delay
+// Simple delay (stereo-safe)
 defineProxy.(\delay, {
     var inputSignal, time, fb, mix, delayed;
-    inputSignal = \in.ar;               // adapt to proxy channels
+    inputSignal = \in.ar(2);             // <-- force stereo
     time = \time.kr(0.35).clip(0.01, 2.0);
     fb   = \fb.kr(0.35).clip(0.0, 0.95);
     mix  = \mix.kr(0.25).clip(0.0, 1.0);
@@ -44,31 +43,31 @@ defineProxy.(\delay, {
     XFade2.ar(inputSignal, delayed, (mix * 2 - 1))
 });
 
-// Tremolo
+// Tremolo (stereo-safe)
 defineProxy.(\tremolo, {
     var inputSignal, rate, depth, lfo;
-    inputSignal = \in.ar;
+    inputSignal = \in.ar(2);
     rate  = \rate.kr(5).clip(0.1, 20);
     depth = \depth.kr(0.5).clip(0, 1);
-    lfo   = (SinOsc.kr(rate).range(1 - depth, 1) );
+    lfo   = SinOsc.kr(rate).range(1 - depth, 1);
     inputSignal * lfo
 });
 
-// Reverb
+// Reverb (stereo-safe without indexing)
 defineProxy.(\reverb, {
     var inputSignal, mix, room, damp;
-    inputSignal = \in.ar;
+    inputSignal = \in.ar(2);
     mix  = \mix.kr(0.25).clip(0, 1);
     room = \room.kr(0.5).clip(0, 1);
     damp = \damp.kr(0.3).clip(0, 1);
-    XFade2.ar(inputSignal, FreeVerb2.ar(inputSignal[0], inputSignal[1], mix, room, damp), 0)
+    // FreeVerb.ar preserves channel count; avoids input[0]/input[1] indexing
+    FreeVerb.ar(inputSignal, mix, room, damp)
 });
 
-
-// Chorus (simple modulated short delay)
+// Chorus (stereo-safe)
 defineProxy.(\chorus, {
     var inputSignal, rate, depth, baseDelay, modDelay;
-    inputSignal = \in.ar;
+    inputSignal = \in.ar(2);
     rate      = \rate.kr(0.8).clip(0.1, 5);
     depth     = \depth.kr(0.008).clip(0.0, 0.02);
     baseDelay = \base.kr(0.020).clip(0.0, 0.05);
@@ -76,10 +75,10 @@ defineProxy.(\chorus, {
     DelayC.ar(inputSignal, 0.1, modDelay)
 });
 
-// Gentle drive
+// Gentle drive (stereo-safe)
 defineProxy.(\drive, {
     var inputSignal, gain;
-    inputSignal = \in.ar;
+    inputSignal = \in.ar(2);
     gain = \gain.kr(2.5).clip(1, 10);
     (inputSignal * gain).tanh
 });
@@ -90,6 +89,7 @@ defineProxy.(\drive, {
 // Quick sanity
 ~pedalboard.printChains;
 )
+
 
 
 
