@@ -1,27 +1,26 @@
 // fix_current_exclusive_now.scd
-// v0.1
-// MD 20250916-1117
+// v0.3
+// MD 20250916-1132
 
 (
-var log;
+// 0) Stop any direct-to-out and both sinks first (clean slate)
+if(Ndef(\testmelody).isPlaying) { Ndef(\testmelody).stop; "[FIX] stopped \\testmelody direct".postln; };
+if(Ndef(\chainA).isPlaying)     { Ndef(\chainA).stop;     "[FIX] stopped \\chainA".postln; };
+if(Ndef(\chainB).isPlaying)     { Ndef(\chainB).stop;     "[FIX] stopped \\chainB".postln; };
 
-log = { arg m; ("[FIX] " ++ m).postln };
-
-// Stop everything that could be sending directly to outputs
-if(Ndef(\testmelody).isPlaying) { Ndef(\testmelody).stop; log.("stopped \\testmelody direct") };
-if(Ndef(\chainA).isPlaying)     { Ndef(\chainA).stop;     log.("stopped \\chainA") };
-if(Ndef(\chainB).isPlaying)     { Ndef(\chainB).stop;     log.("stopped \\chainB") };
-
-// Ensure stereo busses (cheap no-op if already set)
+// 1) Ensure stereo busses (cheap no-op if already set)
 Ndef(\testmelody).ar(2);
 Ndef(\chainA).ar(2);
 
-// Wire CURRENT explicitly with the correct operator and start CURRENT only
+// 2) Wire CURRENT explicitly with the correct JITLib operator you use in this project,
+//    and play CURRENT only (no chainB)
 Server.default.bind({
-    Ndef(\chainA) <<> Ndef(\testmelody);   // sink receives source through the ‘in’ slot
-    Ndef(\chainA).play(numChannels: 2);    // play CURRENT only
+    Ndef(\chainA) <<> Ndef(\testmelody);
+    Ndef(\chainA).play(numChannels: 2);
 });
 
-~pedalboard.printChains;
-"[FIX] CURRENT exclusive: chainA <<> testmelody; chainA.play".postln;
+// 3) Quick status (target: testmelody=false, chainA=true, chainB=false)
+[\testmelody, \chainA, \chainB, \delay, \chorus].do({ arg nm;
+    ("[PLAY] " ++ nm ++ " = " ++ Ndef(nm).isPlaying).postln;
+});
 )
