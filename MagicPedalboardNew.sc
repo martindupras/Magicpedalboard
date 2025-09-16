@@ -1,4 +1,4 @@
-/* MagicPedalboardNew.sc v0.4.2
+/* MagicPedalboardNew.sc v0.4.3
  A/B pedalboard chain manager built on Ndefs.
 
  - Chains are Arrays of Symbols ordered [sink, …, source].
@@ -28,10 +28,11 @@ MagicPedalboardNew : Object {
 	var <defaultNumChannels;
 	var <defaultSource;
 	var <display;          // optional display adaptor
+	var < processorLib;
 
 	*initClass {
 		var text;
-		version = "v0.4.2";
+		version = "v0.4.3";
 		text = "MagicPedalboardNew " ++ version;
 		text.postln;
 	}
@@ -60,6 +61,11 @@ MagicPedalboardNew : Object {
 
 		Ndef(\chainA, sinkFunc);
 		Ndef(\chainB, sinkFunc);
+		Server.default.bind({
+			Ndef(\chainA).ar(defaultNumChannels);  // typically 2
+			Ndef(\chainB).ar(defaultNumChannels);
+		});
+
 
 		chainAList = [\chainA, defaultSource];
 		chainBList = [\chainB, defaultSource];
@@ -73,7 +79,7 @@ MagicPedalboardNew : Object {
 		Server.default.bind({
 			this.rebuildUnbound(nextChain); // stays stopped
 			this.rebuildUnbound(currentChain); // plays
-});
+		});
 
 /*		this.rebuild(currentChain);
 		this.rebuild(nextChain);*/
@@ -91,6 +97,13 @@ MagicPedalboardNew : Object {
 	// ───────────────────────────────────────────────────────────────
 	// public API
 	// ───────────────────────────────────────────────────────────────
+
+
+	// add a setter (public)
+	setProcessorLib { arg lib;
+		processorLib = lib;
+	}
+
 	setDisplay { arg disp;
 		var shouldShow;
 		display = disp;
@@ -520,10 +533,44 @@ MagicPedalboardNew : Object {
 	}
 
 	// Internal rebuild that assumes we are already inside a server bind (no resets)
-
-	// At end of rebuildUnbound (replace the last if-block)
 	rebuildUnbound { arg listRef;
 		var effective, indexCounter, leftKey, rightKey, sinkKey, hasMinimum, shouldPlay, isPlaying;
+
+		hasMinimum = listRef.size >= 2;
+		if(hasMinimum.not) { ^this };
+
+		effective = this.effectiveListForInternal(listRef);
+		effective.do({ arg keySymbol; this.ensureStereoInternal(keySymbol) });
+
+		indexCounter = 0;
+		while({ indexCounter < (effective.size - 1) }, {
+			leftKey = effective[indexCounter];
+			rightKey = effective[indexCounter + 1];
+			Ndef(leftKey) <<> Ndef(rightKey);
+			indexCounter = indexCounter + 1;
+		});
+
+		sinkKey = effective[0];
+		shouldPlay = (listRef === currentChain);
+		isPlaying = Ndef(sinkKey).isPlaying;
+		if(shouldPlay) {
+			if(isPlaying.not) { Ndef(sinkKey).play(numChannels: defaultNumChannels) };
+		}{
+			if(isPlaying) { Ndef(sinkKey).stop };
+		};
+	}
+
+/*	// At end of rebuildUnbound
+	rebuildUnbound { arg listRef;
+		var effective, indexCounter, leftKey, rightKey, sinkKey, hasMinimum, shouldPlay, isPlaying;
+
+
+/*		if(processorLib.notNil) {
+			// Ask the lib to make sure each symbol in this chain has an Ndef with a function.
+			// It will quietly do nothing for unknown keys.
+			processorLib.ensureFromChain(listRef, defaultNumChannels);
+		};*/
+
 
 		hasMinimum = listRef.size >= 2;
 		if(hasMinimum.not) { ^this };
@@ -548,7 +595,7 @@ MagicPedalboardNew : Object {
 		}{
 			if(isPlaying) { Ndef(sinkKey).stop };
 		};
-	}
+	}*/
 
 /* OLD   rebuildUnbound { arg listRef;
         var effective, indexCounter, leftKey, rightKey, sinkKey, hasMinimum;

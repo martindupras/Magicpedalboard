@@ -32,9 +32,9 @@ playDirect = {
 patchChainManually = {
     // ensure chainA exists
     Ndef(\chainA, { \in.ar(2) });
-    Ndef(\chainA) <<>> Ndef(\toneTest);
+    Ndef(\chainA) <<> Ndef(\toneTest);
     Ndef(\chainA).play;
-    log.("Manual patch: chainA <<>> toneTest; chainA.play — you should still hear tone.");
+    log.("Manual patch: chainA <<> toneTest; chainA.play — you should still hear tone.");
 };
 
 // D) Pedalboard flow: reset -> setSource -> **playCurrent** (explicit) -> print
