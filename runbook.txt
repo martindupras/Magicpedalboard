@@ -1,0 +1,33 @@
+//runbook.txt
+
+After reboot (SC 3.14, macOS)
+
+1) Evaluate files (in this order)
+   - Runner_MagicDisplayGUI.scd    (single wrapped block)
+   - Scenarios_MagicDisplayGUI_Fast.scd    (single wrapped block)
+   - (Optional) Utils_MagicDisplayGUI_Checks.scd
+
+2) Run the one-button command
+   ~md_bootProbeScenario.();
+
+3) Success criteria
+   - Exactly 1 window titled “MagicDisplayGUI – …”
+   - Red PROBE FRAME visible (top-left)
+   - Scenario 1 (fast) shows step-by-step updates
+
+Troubleshooting
+- Guard stuck / “already running”:
+  ~md_runnerUnlock.();
+  ~md_bootProbeScenario.();
+
+- No scenario starts (function missing):
+  (~sc_fast_scenario1.isKindOf(Function)).postln;  // should print true
+  Re-evaluate Scenarios_MagicDisplayGUI_Fast.scd, then:
+  ~md_bootProbeScenario.();
+
+- No window or wrong focus:
+  ~md_forceCreateWindow.();
+  ~md_bootProbeScenario.();
+
+- Check windows:
+  ~md_checkWindows.();

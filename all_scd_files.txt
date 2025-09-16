@@ -1,0 +1,1462 @@
+/* MagicProcessorLibrary_defs.scd
+   Register a few defaults. Keep this file small and readable.
+*/
+(
+var lib, define;
+
+lib = MagicProcessorLibrary.new;
+
+define = { arg key, func; lib.register(key, func) };
+
+// Sources
+define.(\ts0, {
+    var inputSignal;
+    inputSignal = SoundIn.ar((0..1));
+    inputSignal * 1.0
+});
+
+// Effects – same as in bootstrap, or your refined versions
+define.(\delay, {
+    var inputSignal, time, fb, mix, delayed;
+    inputSignal = \in.ar;
+    time = \time.kr(0.35).clip(0.01, 2.0);
+    fb   = \fb.kr(0.35).clip(0.0, 0.95);
+    mix  = \mix.kr(0.25).clip(0.0, 1.0);
+    delayed = CombC.ar(inputSignal, 2.0, time, time * (fb * 6 + 0.1));
+    XFade2.ar(inputSignal, delayed, (mix * 2 - 1))
+});
+
+define.(\tremolo, {
+    var inputSignal, rate, depth;
+    inputSignal = \in.ar;
+    rate  = \rate.kr(5).clip(0.1, 20);
+    depth = \depth.kr(0.5).clip(0, 1);
+    inputSignal * SinOsc.kr(rate).range(1 - depth, 1)
+});
+
+define.(\reverb, {
+    var inputSignal, mix, room, damp;
+    inputSignal = \in.ar;
+    mix  = \mix.kr(0.25).clip(0, 1);
+    room = \room.kr(0.5).clip(0, 1);
+    damp = \damp.kr(0.3).clip(0, 1);
+    XFade2.ar(inputSignal, FreeVerb2.ar(inputSignal[0], inputSignal[1], mix, room, damp), 0)
+});
+
+define.(\chorus, {
+    var inputSignal, rate, depth, baseDelay, modDelay;
+    inputSignal = \in.ar;
+    rate      = \rate.kr(0.8).clip(0.1, 5);
+    depth     = \depth.kr(0.008).clip(0.0, 0.02);
+    baseDelay = \base.kr(0.020).clip(0.0, 0.05);
+    modDelay  = baseDelay + (SinOsc.kr(rate, 0, depth));
+    DelayC.ar(inputSignal, 0.1, modDelay)
+});
+
+define.(\drive, {
+    var inputSignal, gain;
+    inputSignal = \in.ar;
+    gain = \gain.kr(2.5).clip(1, 10);
+    (inputSignal * gain).tanh
+});
+
+// Expose the library in a tilde var for convenience
+~procLib = lib;
+
+// Ensure a basic set now (optional; you can call ensureFromChain later)
+~procLib.ensureMany(~procLib.keys, 2);
+)
+/* MPB_Scenarios_v6.scd — SuperCollider-only (no Markdown)
+   NO MIC TODAY: ts0 is overridden to an internal test source.
+   Test sources are time-varying so delay/reverb are obvious.
+   MD 20250915
+*/
+
+// [0] Prep — boot server
+Server.default.boot;
+
+// [0.1] (Optional hard block) Disable *all* audio input at driver level, then reboot.
+// Comment out if you don't want to reboot.
+// (
+// Server.default.quit;
+// Server.default.options.numInputBusChannels = 0;  // hard disable input
+// Server.default.options.numOutputBusChannels = 2;
+// Server.default.reboot;
+// )
+
+// [0.2] Define musical test sources and effects (idempotent)
+
+// Helper to define an Ndef only if it isn't already defined
+(
+var ensureProxyFunc;
+
+ensureProxyFunc = { arg key, func;
+    var hasSource, canRun;
+    hasSource = Ndef(key).source.notNil;
+    canRun = Server.default.serverRunning;
+    if(hasSource.not and: { canRun }) {
+        Server.default.bind({
+            Ndef(key, func);
+            Ndef(key).ar(2); // stereo bus guarantee
+        });
+    };
+};
+
+// ---- Test sources (no microphone) ----
+
+// Percussive melody pings (pitches change; great for delay/reverb)
+ensureProxyFunc.(\testmelody, {
+    var trig, freqSeq, freq, ampEnv, panPos, tone;
+    trig    = Impulse.kr(3.5);
+    freqSeq = Dseq([220, 277.18, 329.63, 392.00, 329.63, 277.18, 246.94], inf);
+    freq    = Demand.kr(trig, 0, freqSeq);
+    ampEnv  = Decay2.kr(trig, 0.01, 0.35);
+    panPos  = ToggleFF.kr(trig).linlin(0, 1, -0.6, 0.6);
+    tone    = SinOsc.ar(freq) * ampEnv * 0.25;
+    Pan2.ar(tone, panPos)
+});
+
+// Sparse tonal bursts (reverb tails are obvious)
+ensureProxyFunc.(\testbursts, {
+    var trig, env, freq, tone, panPos;
+    trig   = Impulse.kr(1.2);
+    env    = EnvGen.kr(Env.perc(0.005, 0.8, 0.6), trig);
+    freq   = TExpRand.kr(180, 660, trig);
+    tone   = SinOsc.ar(freq) * env * 0.35;
+    panPos = LFNoise1.kr(0.2).range(-0.7, 0.7);
+    Pan2.ar(tone, panPos)
+});
+
+// ---- Effects (stereo-safe, simple defaults) ----
+ensureProxyFunc.(\delay, {
+    var inputSignal, time, fb, mix, delayed;
+    inputSignal = \in.ar(2);
+    time = \time.kr(0.45).clip(0.01, 2.0);
+    fb   = \fb.kr(0.35).clip(0.0, 0.95);
+    mix  = \mix.kr(0.5).clip(0.0, 1.0);
+    delayed = CombC.ar(inputSignal, 2.0, time, time * (fb * 6 + 0.1));
+    XFade2.ar(inputSignal, delayed, (mix * 2 - 1))
+});
+
+ensureProxyFunc.(\tremolo, {
+    var inputSignal, rate, depth, lfo;
+    inputSignal = \in.ar(2);
+    rate  = \rate.kr(5).clip(0.1, 20);
+    depth = \depth.kr(0.6).clip(0, 1);
+    lfo   = SinOsc.kr(rate).range(1 - depth, 1);
+    inputSignal * lfo
+});
+
+ensureProxyFunc.(\reverb, {
+    var inputSignal, mix, room, damp;
+    inputSignal = \in.ar(2);
+    mix  = \mix.kr(0.35).clip(0, 1);
+    room = \room.kr(0.5).clip(0, 1);
+    damp = \damp.kr(0.3).clip(0, 1);
+    FreeVerb.ar(inputSignal, mix, room, damp)
+});
+
+ensureProxyFunc.(\chorus, {
+    var inputSignal, rate, depth, baseDelay, modDelay;
+    inputSignal = \in.ar(2);
+    rate      = \rate.kr(0.8).clip(0.1, 5);
+    depth     = \depth.kr(0.008).clip(0.0, 0.02);
+    baseDelay = \base.kr(0.020).clip(0.0, 0.05);
+    modDelay  = baseDelay + (SinOsc.kr(rate, 0, depth));
+    DelayC.ar(inputSignal, 0.1, modDelay)
+});
+
+ensureProxyFunc.(\drive, {
+    var inputSignal, gain;
+    inputSignal = \in.ar(2);
+    gain = \gain.kr(2.5).clip(1, 10);
+    (inputSignal * gain).tanh
+});
+)
+
+// [0.3] NO MIC GUARANTEE — override \ts0 to be an internal source (before creating pedalboard)
+(
+Server.default.bind({
+    // Use testmelody (or switch to \testbursts by replacing the function)
+    Ndef(\ts0, {
+        var trig, freqSeq, freq, env, panPos, tone;
+        trig    = Impulse.kr(3.5);
+        freqSeq = Dseq([220, 277.18, 329.63, 392.00, 329.63, 277.18, 246.94], inf);
+        freq    = Demand.kr(trig, 0, freqSeq);
+        env     = Decay2.kr(trig, 0.01, 0.35);
+        panPos  = ToggleFF.kr(trig).linlin(0, 1, -0.6, 0.6);
+        tone    = SinOsc.ar(freq) * env * 0.25;
+        Pan2.ar(tone, panPos)
+    });
+    Ndef(\ts0).ar(2);
+});
+);
+
+// [0.4] Pedalboard instance (uses \ts0 internally, now safe)
+~pedalboard = MagicPedalboardNew.new;
+~pedalboard.printChains;
+
+// [A] Audio sanity (no microphone)
+~pedalboard.reset; // CURRENT plays \ts0 which is internal testmelody now
+~pedalboard.setSource(\testmelody); ~pedalboard.switchChain(0.1);
+
+// ======================
+// [1] Scenario 1 — basic
+// ======================
+
+~pedalboard.reset;
+~pedalboard.setSource(\testmelody); ~pedalboard.switchChain(0.1);
+~pedalboard.add(\delay); ~pedalboard.printChains;
+~pedalboard.switchChain(0.1);
+~procs = ~pedalboard.effectiveCurrent; ~currentProcs = if(~procs.size > 2) { ~procs.copyRange(1, ~procs.size-2) } { [] };
+~pedalboard.clearChain;
+(
+var indexCounter;
+indexCounter = 0;
+while({ indexCounter < ~currentProcs.size }, {
+    ~pedalboard.add(~currentProcs[indexCounter]);
+    indexCounter = indexCounter + 1;
+});
+~pedalboard.setSource(~procs.last);
+);
+~pedalboard.add(\reverb); ~pedalboard.printChains;
+~pedalboard.switchChain(0.12);
+~effNext = ~pedalboard.effectiveNext; ~delayIndex = ~effNext.indexOf(\delay);
+if(~delayIndex.notNil and: { ~delayIndex > 0 and: { ~delayIndex < (~effNext.size-1) } }) {
+    ~pedalboard.removeAt(~delayIndex);
+    ~pedalboard.addAt(\tremolo, ~delayIndex);
+};
+~pedalboard.printChains;
+~pedalboard.switchChain(0.1);
+
+// ==========================
+// [2] Scenario 2 — bypass/swap
+// ==========================
+
+~pedalboard.clearChain; ~pedalboard.add(\tremolo); ~pedalboard.add(\chorus); ~pedalboard.add(\delay); ~pedalboard.add(\reverb); ~pedalboard.printChains;
+~pedalboard.bypass(\chorus, true); ~pedalboard.bypass(\reverb, true); ~pedalboard.printChains;
+~pedalboard.switchChain(0.25);
+~pedalboard.bypass(\chorus, false); ~pedalboard.printChains;
+~pedalboard.swap(1, 2); ~pedalboard.printChains;
+~pedalboard.switchChain(0.5);
+~pedalboard.bypass(\reverb, false); ~pedalboard.switchChain(0.1);
+
+// ===============================
+// [3] Scenario 3 — live tweaks now
+// ===============================
+
+~pedalboard.printChains;
+~pedalboard.bypassAtCurrent(1, true); ~pedalboard.printChains;
+~pedalboard.bypassAtCurrent(1, false);
+~pedalboard.switchChain(0.1); ~pedalboard.switchChain(0.1);
+~effNext = ~pedalboard.effectiveNext; ~lastProcIdx = ~effNext.size - 2;
+if(~lastProcIdx >= 1) { ~pedalboard.removeAt(~lastProcIdx); ~pedalboard.addAt(\drive, ~lastProcIdx); };
+~pedalboard.printChains;
+~pedalboard.switchChain(0.1);
+
+
+
+
+~assertHas = { arg list, key;
+    if(list.includes(key).not) { ("ASSERT missing " ++ key).postln };
+};
+~assertEnds = { arg list, key;
+    if(list.last != key) { ("ASSERT last must be " ++ key).postln };
+};
+(
+// =========================
+// Runner_MagicDisplayGUI.scd  (single block)
+// =========================
+
+/* Goals:
+   - Exactly 1 MagicDisplayGUI window (close dupes; rebuild cleanly)
+   - Visible PROBE FRAME overlay
+   - Run Scenario 1 (fast) step-by-step
+   - Re-entrant guard with auto-unlock; repeatable after closing the window
+   - AppClock-only GUI operations; no server.sync; no watchers; no queueUi override
+   - Style: tilde vars, var-first, lowercase names, no single-letter locals
+*/
+
+~md_version = (~md_version ? (
+    runner: "Runner 1.0.3",
+    mpb: "MagicPedalboardNew v0.3.8",
+    md: "MagicDisplay v0.1.2",
+    mdgui: "MagicDisplayGUI v0.2.4"
+));
+
+~md_guard = ~md_guard ? false;
+~md_guard_time = ~md_guard_time ? nil;
+~md_guard_timeout = ~md_guard_timeout ? 10.0;
+~md_run_token = ~md_run_token ? 0;
+
+/* ---------- preflight ---------- */
+
+~md_preflightGui = {
+    var did_set;
+    did_set = false;
+    GUI.qt;  // safe to call repeatedly; warning is cosmetic
+    AppClock.sched(0.0, { "[AC] preflight ping".postln; nil });
+    did_set = true;
+    did_set
+};
+
+/* ---------- window helpers ---------- */
+
+~md_title_is_mdg = { |window_ref|
+    var ok, title_text, lower;
+    ok = false;
+    title_text = "";
+    lower = "";
+    if(window_ref.notNil) {
+        if(window_ref.respondsTo(\name) and: { window_ref.name.notNil }) {
+            title_text = window_ref.name.asString;
+            lower = title_text.toLower;
+            ok = (
+                lower.contains("magicdisplaygui")
+                or: { lower.contains("current / next") }
+                or: { lower.contains("magic display") }
+            );
+        };
+    };
+    ok
+};
+
+~md_all_windows = {
+    var wins;
+    wins = Window.allWindows;
+    if(wins.isNil) { wins = [] };
+    wins
+};
+
+~md_get_gui_windows = {
+    var wins, mdg;
+    wins = ~md_all_windows.();
+    mdg = wins.select({ |w| ~md_title_is_mdg.(w) });
+    mdg
+};
+
+~md_checkWindows = {
+    var wins, titles;
+    wins = ~md_all_windows.();
+    titles = wins.collect({ |w| w.name.asString });
+    "[WIN] ALL count = %, titles = %".format(wins.size, titles).postln;
+};
+
+~md_close_matching_windows = {
+    var wins;
+    wins = ~md_all_windows.();
+    AppClock.sched(0.0, {
+        var to_close, count_closed;
+        to_close = wins.select({ |w| ~md_title_is_mdg.(w) });
+        count_closed = 0;
+        to_close.do({ |w|
+            if(w.notNil) {
+                w.close;
+                count_closed = count_closed + 1;
+            };
+        });
+        "[WIN] closed % MagicDisplayGUI window(s)".format(count_closed).postln;
+        nil
+    });
+};
+
+~md_frontWindow = {
+    var wins, target, prev_flag, has_top;
+    wins = ~md_all_windows.();
+    if(wins.size == 0) {
+        "[WIN] nothing to front".postln;
+    }{
+        target = wins.last;
+        AppClock.sched(0.0, {
+            has_top = target.respondsTo(\alwaysOnTop);
+            if(has_top) {
+                prev_flag = target.alwaysOnTop;
+                target.alwaysOnTop_(true);
+            };
+            target.front;
+            if(has_top) {
+                AppClock.sched(0.05, { target.alwaysOnTop_(prev_flag); nil });
+            };
+            "[WIN] fronted: %".format(target.name).postln;
+            nil
+        });
+    };
+};
+
+/* ---------- PROBE FRAME overlay ---------- */
+
+~md_probe_view = ~md_probe_view ? nil;
+
+~md_attach_probe_frame = {
+    var wins, target, root, bounds_rect, view_local, font_obj;
+    wins = ~md_all_windows.();
+    if(wins.size == 0) {
+        "[GUI] PROBE skipped (no windows)".postln;
+    }{
+        target = wins.last;
+        AppClock.sched(0.0, {
+            if(target.view.isNil) {
+                "[GUI] PROBE skipped (no root view)".postln;
+            }{
+                if(~md_probe_view.notNil) {
+                    (~md_probe_view.tryPerform(\remove) ? nil);
+                    ~md_probe_view = nil;
+                };
+                root = target.view;
+                bounds_rect = Rect(8, 8, 180, 24);
+                font_obj = Font("Helvetica", 12);
+                view_local = UserView(root, bounds_rect).background_(Color.clear).clearOnRefresh_(true);
+                view_local.drawFunc_({
+                    Pen.color_(Color.red); Pen.width = 1.5;
+                    Pen.addRect(Rect(0, 0, bounds_rect.width, bounds_rect.height)); Pen.stroke;
+                    Pen.stringAtPoint("PROBE FRAME", Point(6, 6), font_obj);
+                });
+                view_local.visible_(true);
+                ~md_probe_view = view_local;
+                "[GUI] PROBE FRAME attached".postln;
+            };
+            nil
+        });
+    };
+};
+
+/* ---------- ensure ~mpb exists (best-effort; no server.sync) ---------- */
+
+~md_ensure_mpb = {
+    var created_flag;
+    created_flag = false;
+    if(~mpb.isNil) {
+        "[BOOT] ~mpb missing — creating".postln;
+        if(MagicPedalboardNew.respondsTo(\new)) {
+            ~mpb = MagicPedalboardNew.new;
+            created_flag = true;
+        }{
+            "[BOOT] MagicPedalboardNew.new not available".postln;
+        };
+    }{
+        "[BOOT] ~mpb already present".postln;
+    };
+    if(created_flag) { "[BOOT] created ~mpb".postln; };
+};
+
+/* ---------- public API ---------- */
+
+~md_runnerUnlock = {
+    var now_time;
+    now_time = Main.elapsedTime;
+    if(~md_guard) { "[SAFE] manual unlock".postln };
+    ~md_guard = false;
+    ~md_guard_time = now_time;
+};
+
+/* Emergency fresh-create + front + probe (deterministic) */
+~md_forceCreateWindow = {
+    AppClock.sched(0.0, {
+        "[RUN] force-create window".postln;
+        ~md_preflightGui.();
+        ~md_close_matching_windows.();
+        AppClock.sched(0.20, {
+            // Correct constructor for your GUI: no args; builds on AppClock inside initGui
+            "[BOOT] calling MagicDisplayGUI.new()".postln;
+            ~gui = MagicDisplayGUI.new();
+            AppClock.sched(0.45, {
+                ~md_attach_probe_frame.();
+                ~md_frontWindow.();
+                ~md_checkWindows.();
+                nil
+            });
+            nil
+        });
+        nil
+    });
+};
+
+~md_bootProbeScenario = {
+    var now_time, guard_age, timeout_seconds, token_local, scenario_func;
+
+    ~md_preflightGui.();
+
+    now_time = Main.elapsedTime;
+    guard_age = now_time - (~md_guard_time ? now_time);
+    timeout_seconds = ~md_guard_timeout ? 10.0;
+
+    if(~md_guard and: { guard_age > timeout_seconds }) {
+        "[SAFE] auto-unlock (stale)".postln;
+        ~md_runnerUnlock.();
+    };
+
+    if(~md_guard) {
+        "[RUN] already running — ignoring".postln;
+    }{
+        ~md_guard = true;
+        ~md_guard_time = now_time;
+        ~md_run_token = (~md_run_token ? 0) + 1;
+        token_local = ~md_run_token;
+
+        "[RUN] start token % | % / % / %".format(
+            token_local, ~md_version[\mpb], ~md_version[\md], ~md_version[\mdgui]
+        ).postln;
+
+        // failsafe auto-unlock
+        AppClock.sched(timeout_seconds, {
+            var still_active;
+            still_active = ~md_guard and: { ~md_run_token == token_local };
+            if(still_active) {
+                "[SAFE] auto-unlock (timeout)".postln;
+                ~md_runnerUnlock.();
+            };
+            nil
+        });
+
+        // ensure env + window, then run Scenario 1 (fast)
+        ~md_ensure_mpb.();
+        ~md_forceCreateWindow.();
+        AppClock.sched(0.90, {
+            scenario_func = ~sc_fast_scenario1;
+            if(scenario_func.notNil) {
+                "[RUN] starting Scenario 1 (fast)".postln;
+                scenario_func.({
+                    "[RUN] Scenario 1 complete".postln;
+                    ~md_runnerUnlock.();
+                });
+            }{
+                "[RUN] Scenario 1 function (~sc_fast_scenario1) not found; unlocking".postln;
+                ~md_runnerUnlock.();
+            };
+            nil
+        });
+    };
+};
+
+/* ---------- safe fallback for refresh (non-invasive) ---------- */
+
+if(~refreshGuiFromMpb.isNil) {
+    ~refreshGuiFromMpb = { |tag_text|
+        var safe_tag;
+        safe_tag = tag_text ? "no-tag";
+        "[GUI] refreshGuiFromMpb (fallback) — %".format(safe_tag).postln;
+    };
+    "[INFO] installed fallback ~refreshGuiFromMpb (non-invasive)".postln;
+};
+
+"[INFO] % loaded. Ready.".format(~md_version[\runner]).postln;
+
+) // end block
+(
+// =========================
+// Scenarios_MagicDisplayGUI_Fast.scd  (single block)
+// =========================
+// AppClock-only; uses ~gui.queueUi if present; updates via ~refreshGuiFromMpb + showExpectation
+
+~md_with_queue_ui = { |ui_func|
+    var runnable_func, has_queue;
+    runnable_func = ui_func ? { };
+    has_queue = (~gui.notNil) and: { ~gui.respondsTo(\queueUi) };
+    if(has_queue) { ~gui.queueUi.(runnable_func) }{ "[GUI] queueUi unavailable — skipping ui_func".postln };
+};
+
+// -------- Scenario 1 (fast) --------
+~sc_fast_scenario1 = { |done_func|
+    var step_interval, carry_on;
+    step_interval = 0.25;
+    carry_on = { |next_func| AppClock.sched(step_interval, { next_func.value; nil }) };
+
+    AppClock.sched(0.0, {
+        ~md_with_queue_ui.({
+            if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 1: step 0") };
+        });
+        ~refreshGuiFromMpb.("sc1-step0");
+        nil
+    });
+
+    carry_on.({
+        ~md_with_queue_ui.({ if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 1: step 1") } });
+        ~refreshGuiFromMpb.("sc1-step1");
+
+        carry_on.({
+            ~md_with_queue_ui.({ if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 1: step 2") } });
+            ~refreshGuiFromMpb.("sc1-step2");
+
+            carry_on.({
+                ~md_with_queue_ui.({ if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 1: step 3") } });
+                ~refreshGuiFromMpb.("sc1-step3");
+
+                carry_on.({
+                    ~md_with_queue_ui.({ if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 1: step 4") } });
+                    ~refreshGuiFromMpb.("sc1-step4");
+
+                    carry_on.({
+                        ~md_with_queue_ui.({ if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 1: done") } });
+                        ~refreshGuiFromMpb.("sc1-done");
+                        if(done_func.notNil) { done_func.value };
+                    });
+                });
+            });
+        });
+    });
+};
+
+// -------- Scenario 2 (fast) --------
+~sc_fast_scenario2 = { |done_func|
+    var step_interval;
+    step_interval = 0.2;
+
+    AppClock.sched(0.0, {
+        ~md_with_queue_ui.({ if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 2: A-chain preview") } });
+        ~refreshGuiFromMpb.("sc2-A");
+
+        AppClock.sched(step_interval, {
+            ~md_with_queue_ui.({ if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 2: B-chain preview") } });
+            ~refreshGuiFromMpb.("sc2-B");
+
+            AppClock.sched(step_interval, {
+                ~md_with_queue_ui.({ if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 2: done") } });
+                ~refreshGuiFromMpb.("sc2-done");
+                if(done_func.notNil) { done_func.value };
+                nil
+            });
+            nil
+        });
+        nil
+    });
+};
+
+// -------- Scenario 3 (fast) --------
+~sc_fast_scenario3 = { |done_func|
+    var step_interval, index_counter, rounds_total, do_round;
+    step_interval = 0.18;
+    index_counter = 0;
+    rounds_total = 5;
+
+    AppClock.sched(0.0, {
+        do_round = {
+            if(index_counter >= rounds_total) {
+                ~md_with_queue_ui.({ if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 3: done") } });
+                ~refreshGuiFromMpb.("sc3-done");
+                if(done_func.notNil) { done_func.value };
+            }{
+                ~md_with_queue_ui.({ if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 3: tick %".format(index_counter)) } });
+                ~refreshGuiFromMpb.("sc3-%".format(index_counter));
+                index_counter = index_counter + 1;
+                AppClock.sched(step_interval, { do_round.value; nil });
+            };
+            nil
+        };
+        do_round.value;
+        nil
+    });
+};
+
+) // end block
+/*
+ * Test_MagicDisplayGUI_AllInOne_Monolithic.scd v0.10
+ * Single top-level block = no "unexpected '('" parse issue.
+ *
+ * Contents
+ *  - Section A: Test_MagicDisplayGUI_BootAndScenarios.scd v0.4 (verbatim)
+ *  - Section B: Test_MagicDisplayGUI_Scenarios.scd v0.5 (verbatim)
+ *  - Section C: Test_MagicDisplayGUI_InlineInstrument.scd v0.2 (verbatim)
+ *  - Section D: Resilient UI-queue patch + v6 aliases + one-button runner
+ *
+ * Style respected:
+ *  - tilde vars, var-first in each block, lowercase names
+ *  - no server.sync, explicit AppClock scheduling for UI work (.defer)
+ */
+
+(
+// ======================================================================
+// Section A — Test_MagicDisplayGUI_BootAndScenarios.scd v0.4 (verbatim)
+// ======================================================================
+
+// ---------- shared helpers ------------------------------------------------
+~postState = { |labelString|
+    var curr, nxt;
+    curr = ~mpb.tryPerform(\currentChain);
+    nxt = ~mpb.tryPerform(\nextChain);
+    ("[STATE] " ++ labelString ++ " → current=" ++ curr.asString
+        ++ "  next=" ++ nxt.asString).postln;
+};
+
+~drawOnce = {
+    var curr, nxt, bypassA, bypassB, effA, effB;
+    if(~gui.isNil or: { ~mpb.isNil }) { "Run ~bootGuiV4.() first.".warn; ^nil };
+    curr = ~mpb.currentChain;
+    nxt = ~mpb.nextChain;
+    bypassA = ~mpb.bypassKeysCurrent;
+    bypassB = ~mpb.bypassKeysNext;
+    effA = ~mpb.effectiveCurrent;
+    effB = ~mpb.effectiveNext;
+    // GUI method that actually updates the lists/labels
+    ~gui.showChainsDetailed(curr, nxt, bypassA, bypassB, effA, effB);
+};
+
+~refreshView = { |labelString|
+    ~postState.(labelString);
+    // Console view via MPB (also calls showChainsDetailed under the hood)
+    ~mpb.printChains;
+    // Explicit GUI redraw (belt-and-braces)
+    ~drawOnce.();
+};
+
+// ---------- robust boot: wait for window, then first draw ----------------
+~bootGuiV4 = {
+    var guiObj, board, maxPollCount, pollDelaySeconds, routine;
+    // stop any previous tasks
+    ~mdgTask.notNil.if { ~mdgTask.stop; ~mdgTask = nil };
+    ~bootTask.notNil.if { ~bootTask.stop; ~bootTask = nil };
+
+    // create GUI and disable meters (avoid server dependency)
+    guiObj = MagicDisplayGUI.new;
+    guiObj.enableMeters(false);
+
+    // create pedalboard and attach display
+    board = MagicPedalboardNew(guiObj);
+    ~gui = guiObj;
+    ~mpb = board;
+
+    // poll for the window (it is built asynchronously on AppClock)
+    maxPollCount = 200; // up to ~10 seconds
+    pollDelaySeconds = 0.05;
+    routine = Routine {
+        var pollCount;
+        pollCount = 0;
+        while({ (~gui.window.isNil) and: { pollCount < maxPollCount } }, {
+            pollCount = pollCount + 1;
+            pollDelaySeconds.wait; // SystemClock here; avoids AppClock contention
+        });
+        defer({
+            if(~gui.window.notNil) {
+                "Window ready — fronting and drawing columns.".postln;
+                ~gui.window.front;
+            }{
+                "Window did not appear in time (10 s).".warn;
+            };
+            ~refreshView.("boot");
+        });
+    };
+    ~bootTask = Task(routine, SystemClock).play; // use SystemClock for the polling loop
+    "Booting GUI (meters disabled). Waiting for window…".postln;
+};
+
+// bring GUI to front later if needed
+~frontGui = {
+    if(~gui.notNil and: { ~gui.window.notNil }) { ~gui.window.front };
+};
+
+// stop any running scenario
+~stopScenarios = {
+    var runningTask;
+    runningTask = ~mdgTask;
+    if(runningTask.notNil) { runningTask.stop; ~mdgTask = nil; };
+    "Stopped scenario task (if any).".postln;
+};
+
+// ---------- Scenarios (run on SystemClock, post step labels) -------------
+~scenario1v4 = {
+    var routine, waitSeconds, steps, totalSteps;
+    if(~mpb.isNil or: { ~gui.isNil }) { "Run ~bootGuiV4.() first.".warn; ^nil };
+    waitSeconds = 0.8;
+    steps = [
+        { "[SC1] init".postln; ~refreshView.("SC1/init") },
+        { "[SC1] add flanger".postln;
+          ~mpb.add(\flanger);
+          ~refreshView.("SC1/add flanger") },
+        { "[SC1] bypass flanger → true".postln;
+          ~mpb.bypass(\flanger, true);
+          ~refreshView.("SC1/bypass flanger true") },
+        { "[SC1] add delay".postln;
+          ~mpb.add(\delay);
+          ~refreshView.("SC1/add delay") },
+        { "[SC1] clear NEXT".postln;
+          ~mpb.clearChain;
+          ~refreshView.("SC1/clear NEXT") }
+    ];
+    totalSteps = steps.size;
+    routine = Routine {
+        var stepIndex;
+        stepIndex = 0;
+        while({ stepIndex < totalSteps }, {
+            steps[stepIndex].value;
+            stepIndex = stepIndex + 1;
+            waitSeconds.wait;
+        });
+    };
+    ~stopScenarios.();
+    ~mdgTask = Task(routine, SystemClock).play; // SystemClock: robust in headless/server-off
+    ~mdgTask
+};
+
+~scenario2v4 = {
+    var routine, waitSeconds, steps, totalSteps;
+    if(~mpb.isNil or: { ~gui.isNil }) { "Run ~bootGuiV4.() first.".warn; ^nil };
+    waitSeconds = 0.25;
+    steps = [
+        { "[SC2] init".postln; ~refreshView.("SC2/init") },
+        { "[SC2] add chorus".postln; ~mpb.add(\chorus); ~refreshView.("SC2/add chorus") },
+        { "[SC2] add reverb".postln; ~mpb.add(\reverb); ~refreshView.("SC2/add reverb") },
+        { "[SC2] add tremolo".postln; ~mpb.add(\tremolo); ~refreshView.("SC2/add tremolo") },
+        { "[SC2] removeAt 2".postln; ~mpb.removeAt(2); ~refreshView.("SC2/removeAt 2") },
+        { "[SC2] add phaser".postln; ~mpb.add(\phaser); ~refreshView.("SC2/add phaser") },
+        { "[SC2] clear NEXT".postln; ~mpb.clearChain; ~refreshView.("SC2/clear NEXT") }
+    ];
+    totalSteps = steps.size;
+    routine = Routine {
+        var stepIndex;
+        stepIndex = 0;
+        while({ stepIndex < totalSteps }, {
+            steps[stepIndex].value;
+            stepIndex = stepIndex + 1;
+            waitSeconds.wait;
+        });
+    };
+    ~stopScenarios.();
+    ~mdgTask = Task(routine, SystemClock).play;
+    ~mdgTask
+};
+
+~scenario3v4 = {
+    var routine, waitSeconds, steps, totalSteps;
+    if(~mpb.isNil or: { ~gui.isNil }) { "Run ~bootGuiV4.() first.".warn; ^nil };
+    waitSeconds = 0.6;
+    steps = [
+        { "[SC3] init".postln; ~refreshView.("SC3/init") },
+        { "[SC3] add bitcrusher".postln;
+          ~mpb.add(\bitcrusher);
+          ~refreshView.("SC3/add bitcrusher") },
+        { "[SC3] bypass bitcrusher → false".postln;
+          ~mpb.bypass(\bitcrusher, false);
+          ~refreshView.("SC3/bypass bitcrusher false") },
+        { "[SC3] removeAt 1 (if exists)".postln;
+          ~mpb.removeAt(1);
+          ~refreshView.("SC3/removeAt 1") },
+        { "[SC3] clear NEXT".postln;
+          ~mpb.clearChain;
+          ~refreshView.("SC3/clear NEXT") }
+    ];
+    totalSteps = steps.size;
+    routine = Routine {
+        var stepIndex;
+        stepIndex = 0;
+        while({ stepIndex < totalSteps }, {
+            steps[stepIndex].value;
+            stepIndex = stepIndex + 1;
+            waitSeconds.wait;
+        });
+    };
+    ~stopScenarios.();
+    ~mdgTask = Task(routine, SystemClock).play;
+    ~mdgTask
+};
+
+
+// ======================================================================
+// Section B — Test_MagicDisplayGUI_Scenarios.scd v0.5 (verbatim)
+// ======================================================================
+
+~log = { |msg| ("[SC] " ++ msg).postln };
+
+~refreshGuiFromMpb = {
+    var curr, nxt, bA, bB, eA, eB;
+    if(~gui.isNil or: { ~mpb.isNil }) { "Run ~bootGuiV4.() first.".warn; ^nil };
+    curr = ~mpb.currentChain; nxt = ~mpb.nextChain;
+    bA = ~mpb.bypassKeysCurrent; bB = ~mpb.bypassKeysNext;
+    eA = ~mpb.effectiveCurrent; eB = ~mpb.effectiveNext;
+    ~gui.showChainsDetailed(curr, nxt, bA, bB, eA, eB);
+};
+
+~scenario1v5 = {
+    var routine, waitS, steps;
+    if(~mpb.isNil or: { ~gui.isNil }) { "Run ~bootGuiV4.() first.".warn; ^nil };
+    waitS = 0.8;
+    steps = [
+        { ~log.("init"); ~gui.showExpectation("Command: init", 0); ~refreshGuiFromMpb.() },
+        { ~log.("add flanger"); ~gui.showExpectation("Command: add flanger", 0); ~mpb.add(\flanger); ~refreshGuiFromMpb.() },
+        { ~log.("bypass flanger true"); ~gui.showExpectation("Command: bypass flanger true", 0); ~mpb.bypass(\flanger, true); ~refreshGuiFromMpb.() },
+        { ~log.("add delay"); ~gui.showExpectation("Command: add delay", 0); ~mpb.add(\delay); ~refreshGuiFromMpb.() },
+        { ~log.("clear NEXT"); ~gui.showExpectation("Command: clear NEXT", 0); ~mpb.clearChain; ~refreshGuiFromMpb.() }
+    ];
+    routine = Routine {
+        var i = 0;
+        while({ i < steps.size }, { steps[i].value; i = i + 1; waitS.wait; });
+    };
+    ~mdgTask.notNil.if { ~mdgTask.stop };
+    ~mdgTask = Task(routine, SystemClock).play;
+};
+
+~scenario2v5 = {
+    var routine, waitS, steps;
+    if(~mpb.isNil or: { ~gui.isNil }) { "Run ~bootGuiV4.() first.".warn; ^nil };
+    waitS = 0.25;
+    steps = [
+        { ~log.("init"); ~gui.showExpectation("Command: init", 0); ~refreshGuiFromMpb.() },
+        { ~log.("add chorus"); ~gui.showExpectation("Command: add chorus", 0); ~mpb.add(\chorus); ~refreshGuiFromMpb.() },
+        { ~log.("add reverb"); ~gui.showExpectation("Command: add reverb", 0); ~mpb.add(\reverb); ~refreshGuiFromMpb.() },
+        { ~log.("add tremolo"); ~gui.showExpectation("Command: add tremolo", 0); ~mpb.add(\tremolo); ~refreshGuiFromMpb.() },
+        { ~log.("removeAt 2"); ~gui.showExpectation("Command: removeAt 2", 0); ~mpb.removeAt(2); ~refreshGuiFromMpb.() },
+        { ~log.("add phaser"); ~gui.showExpectation("Command: add phaser", 0); ~mpb.add(\phaser); ~refreshGuiFromMpb.() },
+        { ~log.("clear NEXT"); ~gui.showExpectation("Command: clear NEXT", 0); ~mpb.clearChain; ~refreshGuiFromMpb.() }
+    ];
+    routine = Routine {
+        var i = 0;
+        while({ i < steps.size }, { steps[i].value; i = i + 1; waitS.wait; });
+    };
+    ~mdgTask.notNil.if { ~mdgTask.stop };
+    ~mdgTask = Task(routine, SystemClock).play;
+};
+
+~scenario3v5 = {
+    var routine, waitS, steps;
+    if(~mpb.isNil or: { ~gui.isNil }) { "Run ~bootGuiV4.() first.".warn; ^nil };
+    waitS = 0.6;
+    steps = [
+        { ~log.("init"); ~gui.showExpectation("Command: init", 0); ~refreshGuiFromMpb.() },
+        { ~log.("add bitcrusher"); ~gui.showExpectation("Command: add bitcrusher", 0); ~mpb.add(\bitcrusher); ~refreshGuiFromMpb.() },
+        { ~log.("bypass bitcrusher false"); ~gui.showExpectation("Command: bypass bitcrusher false", 0); ~mpb.bypass(\bitcrusher, false); ~refreshGuiFromMpb.() },
+        { ~log.("removeAt 1"); ~gui.showExpectation("Command: removeAt 1", 0); ~mpb.removeAt(1); ~refreshGuiFromMpb.() },
+        { ~log.("clear NEXT"); ~gui.showExpectation("Command: clear NEXT", 0); ~mpb.clearChain; ~refreshGuiFromMpb.() }
+    ];
+    routine = Routine {
+        var i = 0;
+        while({ i < steps.size }, { steps[i].value; i = i + 1; waitS.wait; });
+    };
+    ~mdgTask.notNil.if { ~mdgTask.stop };
+    ~mdgTask = Task(routine, SystemClock).play;
+};
+
+
+// ======================================================================
+// Section C — Test_MagicDisplayGUI_InlineInstrument.scd v0.2 (verbatim)
+// ======================================================================
+
+~probeGuiV2 = {
+    var hasGui, hasWin, current, next, bypassA, bypassB, effA, effB;
+    hasGui = ~gui.notNil;
+    if(hasGui.not) { "No ~gui. Run ~bootGuiV4.() first.".warn; ^nil };
+    hasWin = ~gui.tryPerform(\window).notNil;
+    ["[PROBE] gui exists:", hasGui, "window exists:", hasWin].postln;
+
+    // very distinctive frame so you can spot it instantly
+    current = [\chainA, \AAA_debug_one, \BBB_debug_two, \ts0];
+    next    = [\chainB, \CCC_debug_three, \DDD_debug_four, \ts0];
+    bypassA = [\BBB_debug_two];
+    bypassB = [];
+    effA    = [\chainA, \AAA_debug_one, \ts0];
+    effB    = [\chainB, \CCC_debug_three, \DDD_debug_four, \ts0];
+
+    // make the "Command:" box change as well (immediate visible cue)
+    ~gui.showExpectation("Command: PROBE FRAME", 0);
+
+    // schedule list redraw on AppClock (same thread your GUI uses internally)
+    AppClock.sched(0, {
+        "[PROBE] Calling showChainsDetailed on AppClock…".postln;
+        ~gui.showChainsDetailed(current, next, bypassA, bypassB, effA, effB);
+        "[PROBE] showChainsDetailed returned.".postln;
+        nil
+    });
+
+    "Probe queued. Expect 'PROBE FRAME' in the Command area and AAA/BBB/CCC/DDD items in the lists."
+    .postln;
+};
+
+
+// ======================================================================
+// Section D — Patch + v6 Aliases + One-button Runner
+// ======================================================================
+
+// Resilient UI-queue patch: make queued UI work run immediately on AppClock
+~md_applyQueueUiPatch = {
+    var displayCandidates, candidateIndex, candidate, patched, proofFun;
+
+    patched = false;
+    displayCandidates = [];
+
+    // Prefer ~magicDisplay if present; fallback to ~gui
+    if(~magicDisplay.notNil) { displayCandidates = displayCandidates.add(~magicDisplay) };
+    if(~gui.notNil)          { displayCandidates = displayCandidates.add(~gui) };
+
+    if(displayCandidates.isEmpty) {
+        "[PATCH] No display object (~magicDisplay or ~gui) yet; run boot first.".postln;
+        ^false
+    };
+
+    candidateIndex = 0;
+    while({ candidateIndex < displayCandidates.size and: { patched.not } }, {
+        candidate = displayCandidates[candidateIndex];
+
+        // Try setter first (slot/property on an object)
+        if(candidate.respondsTo(\queueUi_)) {
+            candidate.queueUi = { |selfArg, fun| fun.defer };  // UI-safe immediate
+            patched = true;
+        }{
+            // Try dictionary/event-like storage
+            if(candidate.respondsTo(\atPut)) {
+                candidate[\queueUi] = { |ignoredSelf, fun| fun.defer }; // UI-safe immediate
+                patched = true;
+            };
+        };
+
+        candidateIndex = candidateIndex + 1;
+    });
+
+    if(patched) {
+        "[PATCH] queueUi patched to immediate (.defer)".postln;
+
+        // Proof-of-life
+        if(candidate.respondsTo(\queueUi)) {
+            candidate.queueUi({ "[CHECK] queueUi immediate hit".postln });
+        }{
+            if(candidate.respondsTo(\at)) {
+                proofFun = candidate[\queueUi];
+                if(proofFun.isKindOf(Function)) {
+                    proofFun.value(candidate, { "[CHECK] queueUi immediate hit".postln });
+                };
+            };
+        };
+        ^true
+    }{
+        "[PATCH] Display found but exposes neither queueUi_ nor atPut; not patched.".postln;
+        ^false
+    };
+};
+
+// Wait-and-patch helper: polls until a display is available, then applies patch
+~md_waitAndPatchQueueUiImmediate = {
+    var attempts, maxAttempts, stepSeconds, routineInstance;
+
+    attempts = 0;
+    maxAttempts = 200;     // ~10 seconds at 0.05s
+    stepSeconds = 0.05;
+
+    routineInstance = Routine({
+        "[PATCH] Waiting for display (~magicDisplay or ~gui)…".postln;
+        while({ attempts < maxAttempts }, {
+            if(~magicDisplay.notNil or: { ~gui.notNil }) {
+                if(~md_applyQueueUiPatch.()) {
+                    thisThread.stop;
+                };
+            };
+            attempts = attempts + 1;
+            stepSeconds.wait;
+        });
+        "[PATCH] Timed out waiting for display; run ~md_waitAndPatchQueueUiImmediate.() again after boot."
+        .postln;
+    }).play(AppClock);
+
+    routineInstance
+};
+
+// v6-style aliases wrapping your existing definitions
+~bootGuiV6 = {
+    var booted;
+    booted = false;
+    if(~bootGuiV4.notNil) {
+        ~bootGuiV4.();
+        booted = true;
+    }{
+        "Missing ~bootGuiV4; please check Section A definitions.".warn;
+    };
+
+    // Start the wait-and-patch watcher right after boot
+    if(booted) {
+        ~md_waitAndPatchQueueUiImmediate.();
+    };
+};
+
+~scenario1v6 = { if(~scenario1v5.notNil) { ~scenario1v5.() }{ if(~scenario1v4.notNil) { ~scenario1v4.() }{ "No scenario1 function found.".warn }} };
+~scenario2v6 = { if(~scenario2v5.notNil) { ~scenario2v5.() }{ if(~scenario2v4.notNil) { ~scenario2v4.() }{ "No scenario2 function found.".warn }} };
+~scenario3v6 = { if(~scenario3v5.notNil) { ~scenario3v5.() }{ if(~scenario3v4.notNil) { ~scenario3v4.() }{ "No scenario3 function found.".warn }} };
+
+~probeGuiV3 = { if(~probeGuiV2.notNil) { ~probeGuiV2.() }{ "No probe function (~probeGuiV2) found.".warn } };
+
+// One-button runner: boot → patch → probe → scenario
+~md_go = {
+    var bootTask;
+    bootTask = Task({
+        "[ALL-IN-ONE] Booting GUI (v6 alias)…".postln;
+        ~bootGuiV6.();
+
+        // small wait for "Window ready…" to appear
+        0.5.wait;
+
+        if(~probeGuiV3.notNil) {
+            "[ALL-IN-ONE] Running probe (~probeGuiV3)…".postln;
+            ~probeGuiV3.();
+        };
+
+        0.2.wait;
+
+        if(~scenario1v6.notNil) {
+            "[ALL-IN-ONE] Running scenario (~scenario1v6)…".postln;
+            ~scenario1v6.();
+        };
+    });
+    bootTask.start;
+    bootTask
+};
+
+// Session banner
+"[ALL-IN-ONE] Ready. Typical flow:\n  1) ~bootGuiV6.();\n  2) ~md_waitAndPatchQueueUiImmediate.();\n  3) ~probeGuiV3.();\n  4) ~scenario1v6.();\nOr just run: ~md_go.();"
+.postln;
+
+) // <— single top-level block ends here
+/* Test_MagicDisplayGUI_BootAndScenarios.scd v0.4
+   Purpose: Deterministic boot (meters OFF), wait for window, then scenarios that
+            clearly post progress AND force GUI redraws every step.
+
+   Style: tilde vars, var-first, lowercase names, no server.sync, no single-letter locals.
+*/
+
+(
+// ---------- shared helpers ----------------------------------------------------
+
+~postState = { |labelString|
+    var curr, nxt;
+    curr = ~mpb.tryPerform(\currentChain);
+    nxt  = ~mpb.tryPerform(\nextChain);
+    ("[STATE] " ++ labelString ++ " → current=" ++ curr.asString
+        ++ " | next=" ++ nxt.asString).postln;
+};
+
+~drawOnce = {
+    var curr, nxt, bypassA, bypassB, effA, effB;
+    if(~gui.isNil or: { ~mpb.isNil }) { "Run ~bootGuiV4.() first.".warn; ^nil };
+
+    curr    = ~mpb.currentChain;
+    nxt     = ~mpb.nextChain;
+    bypassA = ~mpb.bypassKeysCurrent;
+    bypassB = ~mpb.bypassKeysNext;
+    effA    = ~mpb.effectiveCurrent;
+    effB    = ~mpb.effectiveNext;
+
+    // GUI method that actually updates the lists/labels
+    ~gui.showChainsDetailed(curr, nxt, bypassA, bypassB, effA, effB);
+};
+
+~refreshView = { |labelString|
+    ~postState.(labelString);
+    // Console view via MPB (also calls showChainsDetailed under the hood)
+    ~mpb.printChains;
+    // Explicit GUI redraw (belt-and-braces)
+    ~drawOnce.();
+};
+
+// ---------- robust boot: wait for window, then first draw --------------------
+
+~bootGuiV4 = {
+    var guiObj, board, maxPollCount, pollDelaySeconds, routine;
+
+    // stop any previous tasks
+    ~mdgTask.notNil.if { ~mdgTask.stop; ~mdgTask = nil };
+    ~bootTask.notNil.if { ~bootTask.stop; ~bootTask = nil };
+
+    // create GUI and disable meters (avoid server dependency)
+    guiObj = MagicDisplayGUI.new;
+    guiObj.enableMeters(false);
+
+    // create pedalboard and attach display
+    board = MagicPedalboardNew(guiObj);
+    ~gui = guiObj;
+    ~mpb = board;
+
+    // poll for the window (it is built asynchronously on AppClock)
+    maxPollCount = 200;          // up to ~10 seconds
+    pollDelaySeconds = 0.05;
+
+    routine = Routine {
+        var pollCount;
+        pollCount = 0;
+
+        while({ (~gui.window.isNil) and: { pollCount < maxPollCount } }, {
+            pollCount = pollCount + 1;
+            pollDelaySeconds.wait;      // SystemClock here; avoids AppClock contention
+        });
+
+        defer({
+            if(~gui.window.notNil) {
+                "Window ready — fronting and drawing columns.".postln;
+                ~gui.window.front;
+            }{
+                "Window did not appear in time (10 s).".warn;
+            };
+            ~refreshView.("boot");
+        });
+    };
+
+    ~bootTask = Task(routine, SystemClock).play; // use SystemClock for the polling loop
+    "Booting GUI (meters disabled). Waiting for window…".postln;
+};
+
+// bring GUI to front later if needed
+~frontGui = {
+    if(~gui.notNil and: { ~gui.window.notNil }) { ~gui.window.front };
+};
+
+// stop any running scenario
+~stopScenarios = {
+    var runningTask;
+    runningTask = ~mdgTask;
+    if(runningTask.notNil) { runningTask.stop; ~mdgTask = nil; };
+    "Stopped scenario task (if any).".postln;
+};
+
+// ---------- Scenarios (run on SystemClock, post step labels) -----------------
+
+~scenario1v4 = {
+    var routine, waitSeconds, steps, totalSteps;
+
+    if(~mpb.isNil or: { ~gui.isNil }) { "Run ~bootGuiV4.() first.".warn; ^nil };
+
+    waitSeconds = 0.8;
+
+    steps = [
+        { "[SC1] init".postln; ~refreshView.("SC1/init") },
+
+        { "[SC1] add flanger".postln;
+          ~mpb.add(\flanger);
+          ~refreshView.("SC1/add flanger") },
+
+        { "[SC1] bypass flanger → true".postln;
+          ~mpb.bypass(\flanger, true);
+          ~refreshView.("SC1/bypass flanger true") },
+
+        { "[SC1] add delay".postln;
+          ~mpb.add(\delay);
+          ~refreshView.("SC1/add delay") },
+
+        { "[SC1] clear NEXT".postln;
+          ~mpb.clearChain;
+          ~refreshView.("SC1/clear NEXT") }
+    ];
+
+    totalSteps = steps.size;
+
+    routine = Routine {
+        var stepIndex;
+        stepIndex = 0;
+        while({ stepIndex < totalSteps }, {
+            steps[stepIndex].value;
+            stepIndex = stepIndex + 1;
+            waitSeconds.wait;
+        });
+    };
+
+    ~stopScenarios.();
+    ~mdgTask = Task(routine, SystemClock).play;   // SystemClock: robust in headless/server-off
+    ~mdgTask
+};
+
+~scenario2v4 = {
+    var routine, waitSeconds, steps, totalSteps;
+
+    if(~mpb.isNil or: { ~gui.isNil }) { "Run ~bootGuiV4.() first.".warn; ^nil };
+
+    waitSeconds = 0.25;
+
+    steps = [
+        { "[SC2] init".postln; ~refreshView.("SC2/init") },
+        { "[SC2] add chorus".postln;  ~mpb.add(\chorus);  ~refreshView.("SC2/add chorus") },
+        { "[SC2] add reverb".postln;  ~mpb.add(\reverb);  ~refreshView.("SC2/add reverb") },
+        { "[SC2] add tremolo".postln; ~mpb.add(\tremolo); ~refreshView.("SC2/add tremolo") },
+        { "[SC2] removeAt 2".postln;  ~mpb.removeAt(2);   ~refreshView.("SC2/removeAt 2") },
+        { "[SC2] add phaser".postln;  ~mpb.add(\phaser);  ~refreshView.("SC2/add phaser") },
+        { "[SC2] clear NEXT".postln;  ~mpb.clearChain;    ~refreshView.("SC2/clear NEXT") }
+    ];
+
+    totalSteps = steps.size;
+
+    routine = Routine {
+        var stepIndex;
+        stepIndex = 0;
+        while({ stepIndex < totalSteps }, {
+            steps[stepIndex].value;
+            stepIndex = stepIndex + 1;
+            waitSeconds.wait;
+        });
+    };
+
+    ~stopScenarios.();
+    ~mdgTask = Task(routine, SystemClock).play;
+    ~mdgTask
+};
+
+~scenario3v4 = {
+    var routine, waitSeconds, steps, totalSteps;
+
+    if(~mpb.isNil or: { ~gui.isNil }) { "Run ~bootGuiV4.() first.".warn; ^nil };
+
+    waitSeconds = 0.6;
+
+    steps = [
+        { "[SC3] init".postln; ~refreshView.("SC3/init") },
+
+        { "[SC3] add bitcrusher".postln;
+          ~mpb.add(\bitcrusher);
+          ~refreshView.("SC3/add bitcrusher") },
+
+        { "[SC3] bypass bitcrusher → false".postln;
+          ~mpb.bypass(\bitcrusher, false);
+          ~refreshView.("SC3/bypass bitcrusher false") },
+
+        { "[SC3] removeAt 1 (if exists)".postln;
+          ~mpb.removeAt(1);
+          ~refreshView.("SC3/removeAt 1") },
+
+        { "[SC3] clear NEXT".postln;
+          ~mpb.clearChain;
+          ~refreshView.("SC3/clear NEXT") }
+    ];
+
+    totalSteps = steps.size;
+
+    routine = Routine {
+        var stepIndex;
+        stepIndex = 0;
+        while({ stepIndex < totalSteps }, {
+            steps[stepIndex].value;
+            stepIndex = stepIndex + 1;
+            waitSeconds.wait;
+        });
+    };
+
+    ~stopScenarios.();
+    ~mdgTask = Task(routine, SystemClock).play;
+    ~mdgTask
+};
+)
+/* Test_MagicDisplayGUI_InlineInstrument.scd v0.2
+   Goal: verify that MagicDisplayGUI executes UI updates on AppClock and
+         that a single forced frame appears in the lists and "Command:" area.
+*/
+
+(
+~probeGuiV2 = {
+    var hasGui, hasWin, current, next, bypassA, bypassB, effA, effB;
+
+    hasGui = ~gui.notNil;
+    if(hasGui.not) { "No ~gui. Run ~bootGuiV4.() first.".warn; ^nil };
+
+    hasWin = ~gui.tryPerform(\window).notNil;
+
+    ["[PROBE] gui exists:", hasGui, "window exists:", hasWin].postln;
+
+    // very distinctive frame so you can spot it instantly
+    current = [\chainA, \AAA_debug_one, \BBB_debug_two, \ts0];
+    next    = [\chainB, \CCC_debug_three, \DDD_debug_four, \ts0];
+    bypassA = [\BBB_debug_two];
+    bypassB = [];
+    effA    = [\chainA, \AAA_debug_one, \ts0];
+    effB    = [\chainB, \CCC_debug_three, \DDD_debug_four, \ts0];
+
+    // make the "Command:" box change as well (immediate visible cue)
+    ~gui.showExpectation("Command: PROBE FRAME", 0);
+
+    // schedule list redraw on AppClock (same thread your GUI uses internally)
+    AppClock.sched(0, {
+        "[PROBE] Calling showChainsDetailed on AppClock…".postln;
+        ~gui.showChainsDetailed(current, next, bypassA, bypassB, effA, effB);
+        "[PROBE] showChainsDetailed returned.".postln;
+        nil
+    });
+
+    "Probe queued. Expect 'PROBE FRAME' in the Command area and AAA/BBB/CCC/DDD items in the lists."
+    .postln;
+};
+)
+/* Test_MagicDisplayGUI_Scenarios.scd v0.5
+   Very explicit scenarios: log each step, update "Command:", then force GUI redraw.
+*/
+
+(
+~log = { |msg| ("[SC] " ++ msg).postln };
+
+~refreshGuiFromMpb = {
+    var curr, nxt, bA, bB, eA, eB;
+    if(~gui.isNil or: { ~mpb.isNil }) { "Run ~bootGuiV4.() first.".warn; ^nil };
+    curr = ~mpb.currentChain;  nxt = ~mpb.nextChain;
+    bA = ~mpb.bypassKeysCurrent; bB = ~mpb.bypassKeysNext;
+    eA = ~mpb.effectiveCurrent;  eB = ~mpb.effectiveNext;
+    ~gui.showChainsDetailed(curr, nxt, bA, bB, eA, eB);
+};
+
+~scenario1v5 = {
+    var routine, waitS, steps;
+    if(~mpb.isNil or: { ~gui.isNil }) { "Run ~bootGuiV4.() first.".warn; ^nil };
+    waitS = 0.8;
+    steps = [
+        { ~log.("init");               ~gui.showExpectation("Command: init", 0);               ~refreshGuiFromMpb.() },
+        { ~log.("add flanger");        ~gui.showExpectation("Command: add flanger", 0);        ~mpb.add(\flanger);       ~refreshGuiFromMpb.() },
+        { ~log.("bypass flanger true");~gui.showExpectation("Command: bypass flanger true", 0);~mpb.bypass(\flanger, true);~refreshGuiFromMpb.() },
+        { ~log.("add delay");          ~gui.showExpectation("Command: add delay", 0);          ~mpb.add(\delay);         ~refreshGuiFromMpb.() },
+        { ~log.("clear NEXT");         ~gui.showExpectation("Command: clear NEXT", 0);         ~mpb.clearChain;          ~refreshGuiFromMpb.() }
+    ];
+    routine = Routine {
+        var i = 0;
+        while({ i < steps.size }, { steps[i].value; i = i + 1; waitS.wait; });
+    };
+    ~mdgTask.notNil.if { ~mdgTask.stop };
+    ~mdgTask = Task(routine, SystemClock).play;
+};
+
+~scenario2v5 = {
+    var routine, waitS, steps;
+    if(~mpb.isNil or: { ~gui.isNil }) { "Run ~bootGuiV4.() first.".warn; ^nil };
+    waitS = 0.25;
+    steps = [
+        { ~log.("init");        ~gui.showExpectation("Command: init", 0);        ~refreshGuiFromMpb.() },
+        { ~log.("add chorus");  ~gui.showExpectation("Command: add chorus", 0);  ~mpb.add(\chorus);     ~refreshGuiFromMpb.() },
+        { ~log.("add reverb");  ~gui.showExpectation("Command: add reverb", 0);  ~mpb.add(\reverb);     ~refreshGuiFromMpb.() },
+        { ~log.("add tremolo"); ~gui.showExpectation("Command: add tremolo", 0); ~mpb.add(\tremolo);    ~refreshGuiFromMpb.() },
+        { ~log.("removeAt 2");  ~gui.showExpectation("Command: removeAt 2", 0);  ~mpb.removeAt(2);      ~refreshGuiFromMpb.() },
+        { ~log.("add phaser");  ~gui.showExpectation("Command: add phaser", 0);  ~mpb.add(\phaser);     ~refreshGuiFromMpb.() },
+        { ~log.("clear NEXT");  ~gui.showExpectation("Command: clear NEXT", 0);  ~mpb.clearChain;       ~refreshGuiFromMpb.() }
+    ];
+    routine = Routine {
+        var i = 0;
+        while({ i < steps.size }, { steps[i].value; i = i + 1; waitS.wait; });
+    };
+    ~mdgTask.notNil.if { ~mdgTask.stop };
+    ~mdgTask = Task(routine, SystemClock).play;
+};
+
+~scenario3v5 = {
+    var routine, waitS, steps;
+    if(~mpb.isNil or: { ~gui.isNil }) { "Run ~bootGuiV4.() first.".warn; ^nil };
+    waitS = 0.6;
+    steps = [
+        { ~log.("init");                 ~gui.showExpectation("Command: init", 0);                 ~refreshGuiFromMpb.() },
+        { ~log.("add bitcrusher");       ~gui.showExpectation("Command: add bitcrusher", 0);       ~mpb.add(\bitcrusher);  ~refreshGuiFromMpb.() },
+        { ~log.("bypass bitcrusher false");~gui.showExpectation("Command: bypass bitcrusher false", 0); ~mpb.bypass(\bitcrusher, false); ~refreshGuiFromMpb.() },
+        { ~log.("removeAt 1");          ~gui.showExpectation("Command: removeAt 1", 0);           ~mpb.removeAt(1);       ~refreshGuiFromMpb.() },
+        { ~log.("clear NEXT");           ~gui.showExpectation("Command: clear NEXT", 0);           ~mpb.clearChain;        ~refreshGuiFromMpb.() }
+    ];
+    routine = Routine {
+        var i = 0;
+        while({ i < steps.size }, { steps[i].value; i = i + 1; waitS.wait; });
+    };
+    ~mdgTask.notNil.if { ~mdgTask.stop };
+    ~mdgTask = Task(routine, SystemClock).play;
+};
+)
+(
+// =========================
+// Utils_MagicDisplayGUI_Checks.scd  (single block)
+// =========================
+
+~md_checkEnv = {
+    var gui_present, queue_ok, setter_ok, atput_ok, win_count, win_titles;
+    gui_present = ~gui.notNil;
+    queue_ok = gui_present and: { ~gui.respondsTo(\queueUi) };
+    setter_ok = gui_present and: { ~gui.respondsTo(\queueUi_) };
+    atput_ok = gui_present and: { ~gui.respondsTo(\atPut) };
+    win_count = (~md_get_gui_windows.notNil).if({ ~md_get_gui_windows.().size }, { 0 });
+    win_titles = (win_count > 0).if({ ~md_get_gui_windows.().collect({ |w| w.name.asString }) }, { [] });
+    "[ENV] mpb:% gui:% queueUi:% queueUi_:% atPut:% windows:% titles:%"
+        .format(~mpb.notNil, gui_present, queue_ok, setter_ok, atput_ok, win_count, win_titles)
+        .postln;
+};
+
+~md_appclock_ping = {
+    AppClock.sched(0.0, { "[AC] ping ok @ % s".format(Main.elapsedTime.round(0.001)).postln; nil });
+};
+
+) // end block

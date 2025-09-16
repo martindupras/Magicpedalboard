@@ -1,0 +1,95 @@
+Summary.text
+
+Design notes
+Chains are arrays of symbols ordered as [sink, ... processors ..., source].
+There are two chains: \chainA (CURRENT) and \chainB (NEXT). You switch with a short crossfade.
+Most mutators (add/remove/swap/bypass) operate on the NEXT chain. “Current” variants exist when needed.
+MagicDisplayGUI provides a queueUi { |f| … } entry point; all GUI updates go through it (or are scheduled on AppClock internally).
+Class summaries & key API
+MagicPedalboardNew (Object)
+Responsibilities:
+
+Create and manage two chains (\chainA, \chainB) using Ndefs.
+Maintain bypass dictionaries per-chain.
+Rebuild chains non-destructively; only .reset does a soft server-tree clean.
+Notify a display adaptor (MagicDisplay/MagicDisplayGUI) of state changes.
+Key methods (abridged):
+
+Construction: MagicPedalboardNew.new(displayOrNil)
+Playback: playCurrent, stopCurrent, switchChain(fadeTime=0.1)
+Mutators (NEXT): add(key), addAt(key, index), removeAt(index), swap(iA, iB), clearChain()
+Bypass (NEXT): bypass(key, state=true), bypassAt(index, state=true)
+Bypass (CURRENT): bypassCurrent(key, state), bypassAtCurrent(index, state)
+Sources: setSource(key), setSourceCurrent(key)
+Diagnostics: printChains, effectiveCurrent / effectiveNext, bypassKeysCurrent / bypassKeysNext, reset
+Notes:
+
+Chains always contain at least [sink, source].
+Rebuild is guarded by ensureServerTree and runs inside Server.default.bind { ... }.
+Ndef channel counts are normalized by a small helper before connections.
+MagicDisplay (Object)
+Responsibilities:
+
+Console display adaptor with a logLevel and formatting helpers.
+Key methods (abridged):
+
+showInit(pedalboard, versionString, current, next)
+showRebuild(which, fullChain, effective)
+showPlay(sink), showStop(sink), showSwitch(oldSink, newSink, current, next)
+showMutation(action, args, nextChain)
+showBypass(which, key, state, chain, bypassKeys)
+showReset(current, next), showChains and showChainsDetailed(...)
+showError(message)
+MagicDisplayGUI (MagicDisplay)
+Responsibilities:
+
+Build a single Qt window titled “MagicDisplayGUI – CURRENT / NEXT”.
+Show top-down lists for CURRENT and NEXT (src → procs → sink).
+Provide an “Expectation / Countdown” area and an operations list.
+Optional A/B meters (chain buses) with OSC callbacks.
+Key methods (abridged):
+
+Construction: MagicDisplayGUI.new() (no args). Internally calls initGui and builds UI on AppClock.
+UI queue: queueUi { |f| … } (defers to AppClock when ready; buffers actions until views exist).
+Visualization: highlightCurrentColumn, formatListTopDown(listRef, bypassKeys, effectiveList)
+Expectation/Countdown: showExpectation(text, seconds), startCountdown(seconds, label, onFinished)
+Operations: setOperations(items), setNextAction(func), runNextOperation(index), updateOpsHighlight
+Meters: enableMeters(flag=true) (adds minimal SynthDefs for \busMeterA/\busMeterB on demand; see Note below)
+Display hooks: overrides showInit / showRebuild / showPlay / showStop / showSwitch / showMutation / showBypass / showReset / showChainsDetailed / showError
+Meter note:
+
+On first enable, the GUI may need to add minimal meter SynthDefs. If you prefer to suppress any first-run warnings, preinstall stubs before enabling meters (see “Meters: stubs” below).
+MagicProcessorLibrary (Object)
+Responsibilities:
+
+Registry of functions for sources/effects: register, get, has, keys.
+Server helpers to ensure Ndefs exist/stereo-ready: ensure, ensureMany, ensureFromChain.
+Usage example:
+
+
+
+
+SuperCollider
+(
+var lib = MagicProcessorLibrary.new;
+lib.register(\ts0, { SoundIn.ar((0..1)) * 1.0 });  // source
+lib.register(\delay, { |in, time=0.35, fb=0.35, mix=0.25|
+    var sig = \in.ar;
+    var delayed = CombC.ar(sig, 2.0, time.clip(0.01, 2.0), time * (fb.clip(0,0.95) * 6 + 0.1));
+    XFade2.ar(sig, delayed, (mix.clip(0,1) * 2 - 1))
+});
+lib.ensureMany(lib.keys, 2);  // stereo
+)
+
+Runner & scenarios
+Runner: One public entry ~md_bootProbeScenario.();
+
+Guarantees exactly one window, reuses live if found.
+Adds a visible PROBE FRAME overlay.
+Runs Scenario 1 (fast), with token-gated steps to ignore stale schedules.
+Provides helpers: ~md_forceCreateWindow.(), ~md_frontWindow.(), ~md_checkWindows.(), ~md_runnerUnlock.().
+Scenarios: Keep a single “fast” scenario file. Each step:
+
+Logs the step.
+Schedules UI via queueUi (if available) on AppClock.
+Checks the run token to avoid stale actions.
