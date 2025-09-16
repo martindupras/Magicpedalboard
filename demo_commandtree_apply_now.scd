@@ -1,16 +1,15 @@
 // demo_commandtree_apply_now.scd
-// v0.1
-// MD 20250916-0942
+// v0.2
+// MD 20250916-1003
 
 (
-var jsonPath, ensureAudioAndGui, ensurePedalboard, log;
+var ensureAudio, ensureGui, ensurePedalboard, ensureAdapter, log;
 
-jsonPath = "/Users/martindupras/CommandTreeSavefiles/myTree.json".standardizePath;
-
+// simple logger
 log = { arg messageString; ("[DEMO] " ++ messageString).postln };
 
-// A) Audio: boot and ensure a musical internal source (stereo)
-ensureAudioAndGui = {
+// A) Audio: boot + musical internal source (stereo)
+ensureAudio = {
     Server.default.boot;
     Server.default.bind({
         Ndef(\testmelody, {
@@ -24,7 +23,8 @@ ensureAudioAndGui = {
             Pan2.ar(tone, panPos)
         });
         Ndef(\testmelody).ar(2);
-        // Optional effects (safe if already defined)
+
+        // lightweight FX (safe to re-run)
         Ndef(\delay, { |in, time=0.45, fb=0.35, mix=0.5|
             var sig = \in.ar(2);
             var delayed = CombC.ar(sig, 2.0, time.clip(0.01, 2.0), time * (fb.clip(0,0.95) * 6 + 0.1));
@@ -36,40 +36,51 @@ ensureAudioAndGui = {
             DelayC.ar(sig, 0.1, mod)
         });
     });
-
-    // Bring up your single GUI window via your runner
-    ~md_bootProbeScenario.();  // one window + PROBE FRAME
 };
 
-// B) Pedalboard + GUI binding (reuse if present)
+// B) GUI: your runner guarantees one window + PROBE FRAME
+ensureGui = {
+    ~md_bootProbeScenario.();
+};
+
+// C) Pedalboard + GUI binding (reuse if present)
 ensurePedalboard = {
-    ~gui = ~gui ?? { MagicDisplayGUI.new() };  // class builds its window on AppClock internally
-    ~pedalboard = ~pedalboard ?? { MagicPedalboardNew.new(~gui) };
+    if(~gui.isNil) { ~gui = MagicDisplayGUI.new() };
+    if(~pedalboard.isNil) { ~pedalboard = MagicPedalboardNew.new(~gui) };
     ~pedalboard.setSource(\testmelody);
-    ~pedalboard.switchChain(0.12); // make CURRENT audible
+    ~pedalboard.switchChain(0.12);
 };
 
-// Run prep
-ensureAudioAndGui.value;
-ensurePedalboard.value;
+// D) Adapter presence
+ensureAdapter = {
+    if(~ct_sendAndApply.isNil) {
+        "[DEMO] Please evaluate adapter_commandtree_to_magicpedalboard.scd first.".warn;
+    };
+};
 
-// C) Reload CommandManager so it imports the updated JSON
-~cm = CommandManager.new;     // imports "/Users/.../myTree.json" by design
+// ---- run prep ----
+ensureAudio.value;
+ensureGui.value;
+ensurePedalboard.value;
+ensureAdapter.value;
+
+// E) Reload CommandManager (imports updated myTree.json automatically)
+~cm = CommandManager.new;
 log.("CommandManager reloaded.");
 
-// D) Use the queue + SEND + adapter to apply actions
+// F) Drive actions via queue + SEND + adapter
 
-// 1) Add delay to NEXT
+// 1) add delay
 ~cm.midiManager.queue.clear;
 ~cm.midiManager.queue.enqueueCommand(\add);
 ~cm.midiManager.queue.enqueueCommand(\delay);
 ~ct_sendAndApply.(~cm, ~pedalboard, ~gui);
 
-// 2) Switch to hear/see it as CURRENT
+// 2) switch (make it CURRENT, audible)
 ~cm.midiManager.queue.enqueueCommand(\switch);
 ~ct_sendAndApply.(~cm, ~pedalboard, ~gui);
 
-// 3) Bypass delay ON, then OFF, with another switch
+// 3) bypass delay ON, then OFF, then switch back
 ~cm.midiManager.queue.enqueueCommand(\bypass);
 ~cm.midiManager.queue.enqueueCommand(\delay);
 ~cm.midiManager.queue.enqueueCommand(\on);
@@ -80,6 +91,6 @@ log.("CommandManager reloaded.");
 ~cm.midiManager.queue.enqueueCommand(\off);
 ~ct_sendAndApply.(~cm, ~pedalboard, ~gui);
 
-// Print chain state (also drives GUI detailed view)
+// Inspect (also drives GUI detailed view)
 ~pedalboard.printChains;
 )
