@@ -1,130 +1,75 @@
-// adapter_CommandTree_to_MagicPedalboard.scd
-// v0.1
-// MD 20250916-0832
+// adapter_commandtree_to_magicpedalboard.scd
+// v0.2
+// MD 20250916-0848
 
 (
+~ct_knownVerbs = #[\add, \bypass, \removeAt, \swap, \clear, \setSource, \switch];
+~ct_knownProcs = #[\delay, \chorus, \tremolo, \reverb, \drive, \transpose, \hex, \audio, \filters, \delays, \noise, \oscillators];
+// ^ extend this list as you add processors to your library/tree
 ~ct_applyOSCPathToMPB = { arg oscPathString, pedalboard, gui;
-    var tokens, tokenCount, verb, params, successFlag;
-    var postMsg;
+    var tokens, verb, params, postMsg;
 
     postMsg = { arg text; ("[CT->MPB] " ++ text).postln };
 
-    // Parse "/verb/arg1/arg2" into tokens ["verb","arg1","arg2"]
     tokens = oscPathString.asString.split($/).reject({ arg one; one.isEmpty });
-    tokenCount = tokens.size;
+    if (tokens.isEmpty) { postMsg.("empty OSC path"); ^false };
 
-    if (tokenCount == 0) {
-        postMsg.("empty OSC path; nothing to apply.");
-        ^false
+    // smart fallback: if first token is a processor (not a verb), treat as add/<proc>
+    if (~ct_knownVerbs.includes(tokens[0].asSymbol).not and: { ~ct_knownProcs.includes(tokens[0].asSymbol) }) {
+        tokens = ["add"] ++ tokens;
     };
 
     verb = tokens[0].asSymbol;
-    params = tokens.copyRange(1, tokenCount - 1).collect({ arg one; one.asSymbol });
+    params = tokens.copyRange(1, tokens.size - 1).collect({ arg one; one.asSymbol });
 
-    postMsg.("path=" ++ oscPathString ++ "  verb=" ++ verb ++ "  params=" ++ params);
+    postMsg.("path=" ++ oscPathString ++ "  -> verb=" ++ verb ++ " params=" ++ params);
 
-    // Map verbs to MagicPedalboardNew actions (NEXT by default; switch affects CURRENT)
     switch(verb,
         \add, {
-            var procSym;
-            if (params.size >= 1) {
-                procSym = params[0];
-                pedalboard.add(procSym);
-                postMsg.("add " ++ procSym);
-            } {
-                postMsg.("add: missing processor symbol");
-            };
+            if (params.size >= 1) { pedalboard.add(params[0]); postMsg.("add " ++ params[0]) }
+            { postMsg.("add: missing processor") };
         },
         \bypass, {
-            var procSym, stateSym, stateBool;
-            if (params.size >= 2) {
-                procSym = params[0];
-                stateSym = params[1];
-                stateBool = (stateSym == \on);
-                pedalboard.bypass(procSym, stateBool);
-                postMsg.("bypass " ++ procSym ++ " -> " ++ stateBool);
-            } {
-                postMsg.("bypass: need proc and on/off");
-            };
+            var stateBool = (params.size >= 2) and: { params[1] == \on };
+            if (params.size >= 1) { pedalboard.bypass(params[0], stateBool); postMsg.("bypass " ++ params[0] ++ " -> " ++ stateBool) }
+            { postMsg.("bypass: need proc and on/off") };
         },
         \removeAt, {
-            var indexInteger;
-            if (params.size >= 1) {
-                indexInteger = params[0].asString.asInteger;
-                pedalboard.removeAt(indexInteger);
-                postMsg.("removeAt " ++ indexInteger);
-            } {
-                postMsg.("removeAt: need index");
-            };
+            if (params.size >= 1) { pedalboard.removeAt(params[0].asString.asInteger); postMsg.("removeAt " ++ params[0]) }
+            { postMsg.("removeAt: need index") };
         },
         \swap, {
-            var aIndex, bIndex;
             if (params.size >= 2) {
-                aIndex = params[0].asString.asInteger;
-                bIndex = params[1].asString.asInteger;
-                pedalboard.swap(aIndex, bIndex);
-                postMsg.("swap " ++ aIndex ++ " <-> " ++ bIndex);
-            } {
-                postMsg.("swap: need two indices");
-            };
+                pedalboard.swap(params[0].asString.asInteger, params[1].asString.asInteger);
+                postMsg.("swap " ++ params[0] ++ " <-> " ++ params[1]);
+            } { postMsg.("swap: need two indices") };
         },
-        \clear, {
-            pedalboard.clearChain;
-            postMsg.("clear NEXT");
-        },
+        \clear, { pedalboard.clearChain; postMsg.("clear NEXT") },
         \setSource, {
-            var srcSym;
-            if (params.size >= 1) {
-                srcSym = params[0];
-                pedalboard.setSource(srcSym);
-                postMsg.("setSource " ++ srcSym);
-            } {
-                postMsg.("setSource: missing symbol");
-            };
+            if (params.size >= 1) { pedalboard.setSource(params[0]); postMsg.("setSource " ++ params[0]) }
+            { postMsg.("setSource: missing symbol") };
         },
-        \switch, {
-            pedalboard.switchChain(0.12);
-            postMsg.("switch NEXT->CURRENT (crossfade)");
-        },
-        { // default
-            postMsg.("unknown verb: " ++ verb);
-        }
+        \switch, { pedalboard.switchChain(0.12); postMsg.("switch crossfade") },
+        { postMsg.("unknown verb: " ++ verb) }
     );
-
-    // Drive the GUI via existing display hooks (no direct GUI ops here).
-    // pedalboard.display.showChainsDetailed(...) is already called by pedalboard.printChains etc.
-
-    successFlag = true;
-    successFlag
-};
-
-~ct_applyQueueToMPBFromCM = { arg commandManager, pedalboard, gui;
-    var oscPathString, listSnapshot;
-    var postMsg;
-
-    postMsg = { arg text; ("[CT->MPB] " ++ text).postln };
-
-    // Take a snapshot before export (for debugging)
-    listSnapshot = commandManager.midiManager.queue.commandList;   // from your classes
-    postMsg.("queue before export: " ++ listSnapshot);
-
-    // Export as OSC-style path (also sets ~commandToSend in your original queue code)
-    oscPathString = commandManager.midiManager.queue.exportAsOSCPath;
-
-    postMsg.("exported OSC path: " ++ oscPathString);
-
-    // Apply to pedalboard, then clear queue
-    ~ct_applyOSCPathToMPB.(oscPathString, pedalboard, gui);
-    commandManager.midiManager.queue.clear;
 
     true
 };
 
+~ct_applyQueueToMPBFromCM = { arg commandManager, pedalboard, gui;
+    var oscPathString;
+    oscPathString = commandManager.midiManager.queue.exportAsOSCPath; // your queue method
+    ~ct_applyOSCPathToMPB.(oscPathString, pedalboard, gui);
+    commandManager.midiManager.queue.clear;
+    true
+};
+
 ~ct_sendAndApply = { arg commandManager, pedalboard, gui;
-    var modeDict, sendModeSymbol;
-    modeDict = commandManager.midiManager.modes; // from your classes
-    sendModeSymbol = modeDict[\send];
-    commandManager.midiManager.setMode(sendModeSymbol); // triggers export and clear
+    var sendMode;
+    sendMode = commandManager.midiManager.modes[\send];
+    commandManager.midiManager.setMode(sendMode);   // will export & clear inside your code
     ~ct_applyQueueToMPBFromCM.(commandManager, pedalboard, gui);
 };
+
+
 )
