@@ -1,4 +1,4 @@
-/* MagicPedalboardNew.sc v0.4.1
+/* MagicPedalboardNew.sc v0.4.2
  A/B pedalboard chain manager built on Ndefs.
 
  - Chains are Arrays of Symbols ordered [sink, …, source].
@@ -70,8 +70,13 @@ MagicPedalboardNew : Object {
 		currentChain = chainAList;
 		nextChain = chainBList;
 
-		this.rebuild(currentChain);
-		this.rebuild(nextChain);
+		Server.default.bind({
+			this.rebuildUnbound(nextChain); // stays stopped
+			this.rebuildUnbound(currentChain); // plays
+});
+
+/*		this.rebuild(currentChain);
+		this.rebuild(nextChain);*/
 
 /*        Server.default.bind({
             Ndef(\chainA).play(numChannels: defaultNumChannels);
