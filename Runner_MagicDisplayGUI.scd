@@ -220,6 +220,42 @@
         ~md_preflightGui.();
 
         attach_and_front = {
+            ~md_attach_probe_frame.();
+            ~md_frontWindow.();
+            ~md_checkWindows.();
+        };
+
+        AppClock.sched(0.20, {
+            existing_window = Window.allWindows.detect({ |w|
+                var name_string, begins_ok;
+                name_string = w.name.asString;
+                begins_ok = name_string.notNil and: { name_string.beginsWith("MagicDisplayGUI") };
+                begins_ok
+            });
+
+            if(existing_window.notNil) {
+                "[BOOT] reusing existing MagicDisplayGUI window".postln;
+                existing_window.front;
+                AppClock.sched(0.45, { attach_and_front.value; nil });
+            }{
+                "[BOOT] creating MagicDisplayGUI.new()".postln;
+                ~gui = MagicDisplayGUI.new();
+                AppClock.sched(0.45, { attach_and_front.value; nil });
+            };
+            nil
+        });
+        nil
+    });
+};
+
+/*~md_forceCreateWindow = {
+    AppClock.sched(0.0, {
+        var existing_window, attach_and_front;
+
+        "[RUN] ensure single MagicDisplayGUI window".postln;
+        ~md_preflightGui.();
+
+        attach_and_front = {
             // keep your probe & front logic the same
             ~md_attach_probe_frame.();
             ~md_frontWindow.();
@@ -248,7 +284,7 @@
         });
         nil
     });
-};
+};*/
 
 // ~md_forceCreateWindow = {
 // 	AppClock.sched(0.0, {

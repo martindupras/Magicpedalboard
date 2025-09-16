@@ -1,4 +1,4 @@
-/* MagicPedalboardNew.sc v0.4.0
+/* MagicPedalboardNew.sc v0.4.1
  A/B pedalboard chain manager built on Ndefs.
 
  - Chains are Arrays of Symbols ordered [sink, …, source].
@@ -48,11 +48,15 @@ MagicPedalboardNew : Object {
 		defaultNumChannels = 2;
 		defaultSource = \ts0;
 
+		// improved
+		sinkFunc = { arg inSignal; inSignal };
+
+/* old version:
 		sinkFunc = {
 			var inputSignal;
 			inputSignal = \in.ar(defaultNumChannels);
 			inputSignal
-		};
+		};*/
 
 		Ndef(\chainA, sinkFunc);
 		Ndef(\chainB, sinkFunc);
