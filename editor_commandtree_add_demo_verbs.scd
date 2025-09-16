@@ -1,52 +1,52 @@
 // editor_commandtree_add_demo_verbs.scd
 // v0.3
-// MD 20250916-0943
+// MD 20250916-0957
 
 (
 var jsonPath, saveFolder, savePrefix;
 var ensureChildUnder, ensurePath, rootNode, commandsNode;
 
+// paths
 jsonPath   = "/Users/martindupras/CommandTreeSavefiles/myTree.json".standardizePath;
 saveFolder = "/Users/martindupras/CommandTreeSavefiles";
 savePrefix = "myTree";
 
-// Load current tree JSON
+// load
 ~tree = MDCommandTree.new;
 if (~tree.importJSONFile(jsonPath)) {
     "✅ Loaded tree for editing.".postln;
 } {
-    "❌ Failed to load tree JSON".warn;
-    nil;
+    "❌ Failed to load tree JSON".warn; ^nil;
 };
 
-// Helpers
+// helpers
 ensureChildUnder = { arg parentNode, childName, fretNumber;
-    var existingNode, newNode;
+    var existingNode, createdNode;
     existingNode = parentNode.getChildByName(childName);
     if (existingNode.notNil) {
         existingNode
-    }{
-        newNode = ~tree.addNode(parentNode.id, childName, fretNumber);
-        if (newNode.isNil) { ("⚠️ addNode failed for " ++ childName).postln };
-        newNode
+    } {
+        createdNode = ~tree.addNode(parentNode.id, childName, fretNumber);
+        if (createdNode.isNil) { ("⚠️ addNode failed for " ++ childName).postln };
+        createdNode
     }
 };
 
 ensurePath = { arg pathArray, fretArray;
-    var currentNode, pathSize, indexCounter, childName, fretNumber;
+    var currentNode, stepIndex, childName, fretNumber, pathSize;
     currentNode = ~tree.root;
     pathSize = pathArray.size;
-    indexCounter = 0;
-    while({ indexCounter < pathSize }, {
-        childName = pathArray[indexCounter];
-        fretNumber = fretArray[indexCounter] ? 1;
+    stepIndex = 0;
+    while({ stepIndex < pathSize }, {
+        childName = pathArray[stepIndex];
+        fretNumber = fretArray[stepIndex] ? 1;
         currentNode = ensureChildUnder.(currentNode, childName, fretNumber);
-        indexCounter = indexCounter + 1;
+        stepIndex = stepIndex + 1;
     });
     currentNode
 };
 
-// ---- Add demo verbs ----
+// ---- add demo verbs (idempotent) ----
 rootNode = ~tree.root;
 commandsNode = ensureChildUnder.(rootNode, "commands", 10);
 
@@ -66,18 +66,10 @@ ensurePath.(["commands","switch"], [10,3]);
 // commands/setSource/<src>
 ensurePath.(["commands","setSource","testmelody"], [10,4,1]);
 
-// Make payloads equal to names (simple, explicit)
+// set payloads == names (simple, visible)
 ~tree.assignPayloads;
-
-// Show result for visual confirmation
 ~tree.printTreePretty;
 
-// Save a versioned copy and overwrite live JSON
-~saver = ~saver ?? { CircularFileSave.new(savePrefix, saveFolder, 10) };
-~saver.saveVersion(JSONlib.convertToJSON(~tree.root.asDictRecursively));
-"💾 Versioned copy saved.".postln;
-
-~tree.exportJSONFile(jsonPath);
-"💾 Overwrote current JSON at: ".postln;
-jsonPath.postln;
+// save using custom exporter (preserves payloads in JSON)
+~ct_writeJsonWithPayloads.(~tree, jsonPath, true, saveFolder, savePrefix);
 )
