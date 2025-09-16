@@ -1,6 +1,6 @@
 (
 // =========================
-// Runner_MagicDisplayGUI.scd  (single block)
+// Runner_MagicDisplayGUI.scd  (single block)~md_force
 // =========================
 
 /* Goals:
@@ -201,24 +201,62 @@
 /* Emergency fresh-create + front + probe (deterministic) */
 ~md_forceCreateWindow = {
     AppClock.sched(0.0, {
-        "[RUN] force-create window".postln;
+        var existing_window, attach_and_front;
+
+        "[RUN] ensure single MagicDisplayGUI window".postln;
         ~md_preflightGui.();
-        ~md_close_matching_windows.();
+
+        attach_and_front = {
+            // keep your probe & front logic the same
+            ~md_attach_probe_frame.();
+            ~md_frontWindow.();
+            ~md_checkWindows.();
+        };
+
         AppClock.sched(0.20, {
-            // Correct constructor for your GUI: no args; builds on AppClock inside initGui
-            "[BOOT] calling MagicDisplayGUI.new()".postln;
-            ~gui = MagicDisplayGUI.new();
-            AppClock.sched(0.45, {
-                ~md_attach_probe_frame.();
-                ~md_frontWindow.();
-                ~md_checkWindows.();
-                nil
+            existing_window = Window.allWindows.detect({ |w|
+                var name_string, begins_ok;
+                name_string = w.name.asString;
+                begins_ok = name_string.notNil and: { name_string.beginsWith("MagicDisplayGUI") };
+                begins_ok
             });
+
+            if(existing_window.notNil) {
+                "[BOOT] reusing existing MagicDisplayGUI window".postln;
+                existing_window.front;
+                AppClock.sched(0.45, { attach_and_front.value; nil });
+            }{
+                "[BOOT] creating MagicDisplayGUI.new()".postln;
+                // Correct constructor for your GUI: builds on AppClock inside initGui
+                ~gui = MagicDisplayGUI.new();
+                AppClock.sched(0.45, { attach_and_front.value; nil });
+            };
             nil
         });
         nil
     });
 };
+
+// ~md_forceCreateWindow = {
+// 	AppClock.sched(0.0, {
+// 		"[RUN] force-create window".postln;
+// 		~md_preflightGui.();
+// 		~md_close_matching_windows.();
+// 		AppClock.sched(0.20, {
+// 			// Correct constructor for your GUI: no args; builds on AppClock inside initGui
+// 			"[BOOT] calling MagicDisplayGUI.new()".postln;
+// 			~gui = MagicDisplayGUI.new();
+// 			AppClock.sched(0.45, {
+// 				~md_attach_probe_frame.();
+// 				~md_frontWindow.();
+// 				~md_checkWindows.();
+// 				nil
+// 			});
+// 			nil
+// 		});
+// 		nil
+// 	});
+// };
 
 ~md_bootProbeScenario = {
     var now_time, guard_age, timeout_seconds, token_local, scenario_func;
