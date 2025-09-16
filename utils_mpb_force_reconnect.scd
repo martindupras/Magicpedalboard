@@ -1,6 +1,6 @@
 // utils_mpb_force_reconnect.scd
-// v0.1
-// MD 20250916-1052
+// v0.2
+// MD 20250916-1057
 
 (
 ~mpb_forceReconnect = { arg pedalboard;
@@ -10,7 +10,7 @@
 
     connectPair = { arg leftKey, rightKey;
         Server.default.bind({
-            // Correct operator you use elsewhere:
+            // Correct JITLib embed operator used in your project:
             Ndef(leftKey) <<> Ndef(rightKey);
         });
     };
@@ -38,6 +38,6 @@
         if(Ndef(sinkNext).isPlaying)    { Ndef(sinkNext).stop };
     });
 
-    log.("forceReconnect done. cur=" ++ effCur ++ " next=" ++ effNext);
+    log.("forceReconnect done. current=" ++ effCur ++ "  next=" ++ effNext);
 };
 )
