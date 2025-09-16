@@ -44,12 +44,25 @@
     if(window_ref.notNil) {
         if(window_ref.respondsTo(\name) and: { window_ref.name.notNil }) {
             title_text = window_ref.name.asString;
-            // REQUIRE: title begins with "MagicDisplayGUI"
             ok = title_text.beginsWith("MagicDisplayGUI");
         };
     };
     ok
 };
+
+/*~md_title_is_mdg = { |window_ref|
+    var ok, title_text;
+    ok = false;
+    title_text = "";
+    if(window_ref.notNil) {
+        if(window_ref.respondsTo(\name) and: { window_ref.name.notNil }) {
+            title_text = window_ref.name.asString;
+            // REQUIRE: title begins with "MagicDisplayGUI"
+            ok = title_text.beginsWith("MagicDisplayGUI");
+        };
+    };
+    ok
+};*/
 
 /*~md_title_is_mdg = { |window_ref|
     var ok, title_text, lower;
