@@ -1,9 +1,8 @@
 // editor_commandtree_add_demo_verbs.scd
-// v0.2
-// MD 20250916-0933
+// v0.3
+// MD 20250916-0943
 
 (
-// Load current tree
 var jsonPath, saveFolder, savePrefix;
 var ensureChildUnder, ensurePath, rootNode, commandsNode;
 
@@ -11,18 +10,22 @@ jsonPath   = "/Users/martindupras/CommandTreeSavefiles/myTree.json".standardizeP
 saveFolder = "/Users/martindupras/CommandTreeSavefiles";
 savePrefix = "myTree";
 
+// Load current tree JSON
 ~tree = MDCommandTree.new;
 if (~tree.importJSONFile(jsonPath)) {
     "✅ Loaded tree for editing.".postln;
 } {
-    "❌ Failed to load tree JSON".warn; ^nil;
+    "❌ Failed to load tree JSON".warn;
+    nil;
 };
 
-// helpers
+// Helpers
 ensureChildUnder = { arg parentNode, childName, fretNumber;
-    var existing, newNode;
-    existing = parentNode.getChildByName(childName);
-    if (existing.notNil) { existing } {
+    var existingNode, newNode;
+    existingNode = parentNode.getChildByName(childName);
+    if (existingNode.notNil) {
+        existingNode
+    }{
         newNode = ~tree.addNode(parentNode.id, childName, fretNumber);
         if (newNode.isNil) { ("⚠️ addNode failed for " ++ childName).postln };
         newNode
@@ -30,20 +33,20 @@ ensureChildUnder = { arg parentNode, childName, fretNumber;
 };
 
 ensurePath = { arg pathArray, fretArray;
-    var currentNode, stepIndex, childName, fretNumber, pathSize;
+    var currentNode, pathSize, indexCounter, childName, fretNumber;
     currentNode = ~tree.root;
     pathSize = pathArray.size;
-    stepIndex = 0;
-    while({ stepIndex < pathSize }, {
-        childName = pathArray[stepIndex];
-        fretNumber = fretArray[stepIndex] ? 1;
+    indexCounter = 0;
+    while({ indexCounter < pathSize }, {
+        childName = pathArray[indexCounter];
+        fretNumber = fretArray[indexCounter] ? 1;
         currentNode = ensureChildUnder.(currentNode, childName, fretNumber);
-        stepIndex = stepIndex + 1;
+        indexCounter = indexCounter + 1;
     });
     currentNode
 };
 
-// ---- Add the verbs we need for the demo ----
+// ---- Add demo verbs ----
 rootNode = ~tree.root;
 commandsNode = ensureChildUnder.(rootNode, "commands", 10);
 
@@ -63,17 +66,18 @@ ensurePath.(["commands","switch"], [10,3]);
 // commands/setSource/<src>
 ensurePath.(["commands","setSource","testmelody"], [10,4,1]);
 
-// Make payloads equal to names everywhere
+// Make payloads equal to names (simple, explicit)
 ~tree.assignPayloads;
 
-// Show result
+// Show result for visual confirmation
 ~tree.printTreePretty;
 
-// Save a version and export JSON back to the same path
-~saver = CircularFileSave.new(savePrefix, saveFolder, 10);
+// Save a versioned copy and overwrite live JSON
+~saver = ~saver ?? { CircularFileSave.new(savePrefix, saveFolder, 10) };
 ~saver.saveVersion(JSONlib.convertToJSON(~tree.root.asDictRecursively));
 "💾 Versioned copy saved.".postln;
 
 ~tree.exportJSONFile(jsonPath);
-"💾 Overwrote current JSON at: ".postln; jsonPath.postln;
+"💾 Overwrote current JSON at: ".postln;
+jsonPath.postln;
 )
