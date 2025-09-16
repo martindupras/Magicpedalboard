@@ -31,7 +31,7 @@ MagicPedalboardNew : Object {
 
 	*initClass {
 		var text;
-		version = "v0.3.8";
+		version = "v0.4.2";
 		text = "MagicPedalboardNew " ++ version;
 		text.postln;
 	}
