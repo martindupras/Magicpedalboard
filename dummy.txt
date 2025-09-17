@@ -1,3 +1,0 @@
-line 1: hello
-be-bop a lula
-line 3: goodbye
