@@ -1,13 +1,17 @@
 // OneShot_Acceptance_CommandDriven.scd
-// v0.2.2
-// MD 20250917-1306
+// v0.2.3
+// MD 20250917-1312
 //
-// Purpose: Robust acceptance using your adapter. Waits for server + ~mpb + adapter,
-//          disables meters during ops, pins stereo sinks, enforces Option A and
-//          hard-drops NEXT monitor (.end), recreates silent stereo NEXT, then asserts
-//          A XOR B after each step. No rewiring; adapter-only control.
+// Purpose: Robust, non-intrusive acceptance using your adapter.
+//          - Waits for server + ~mpb + adapter
+//          - Disables meters only during ops (to avoid attach races)
+//          - Pins stereo shape with mold(2,\audio) (does NOT overwrite sink sources)
+//          - Enforces Option A at source level; hard-drops NEXT monitor with .end
+//            (does NOT replace NEXT’s source), so flags match audio
+//          - Drives: /add/delay → /switch → /bypass/delay/on → /bypass/delay/off → /switch
+//          - Asserts A XOR B after each step and prints a summary
 // Style: tilde vars, var-first, lowercase names, no server.sync,
-//        server ops inside Server.default.bind. GUI on AppClock only.
+//        server ops inside Server.default.bind. GUI AppClock only; one window.
 
 (
 var log, step, t,
@@ -37,22 +41,31 @@ ready = {
     true
 };
 
-// meters control
-disableMeters = { if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) { ~gui.enableMeters(false); log.("meters disabled") } };
-enableMeters  = { if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) { ~gui.enableMeters(true);  log.("meters enabled")  } };
+// meters control (non-intrusive)
+disableMeters = {
+    if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) {
+        ~gui.enableMeters(false);
+        log.("meters disabled");
+    };
+};
+enableMeters = {
+    if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) {
+        ~gui.enableMeters(true);
+        log.("meters enabled");
+    };
+};
 
-// pin sinks (authoritative)
+// non-destructive stereo pin (NO source overwrite)
 pinStereoSinks = {
     Server.default.bind({
         Ndef(\chainA).mold(2, \audio);
         Ndef(\chainB).mold(2, \audio);
-        Ndef(\chainA, { \in.ar(2) }); Ndef(\chainA).ar(2);
-        Ndef(\chainB, { \in.ar(2) }); Ndef(\chainB).ar(2);
+        // NOTE: no Ndef(\chainX, { \in.ar(2) }) here; class manages sources.
     });
-    log.("sinks pinned: mold(2,audio) + \\in.ar(2)");
+    log.("sinks pinned: mold(2,audio) (non-destructive)");
 };
 
-// sources
+// sources (safe to define)
 ensureSources = {
     Server.default.bind({
         Ndef(\testmelody, {
@@ -69,16 +82,16 @@ ensureSources = {
     log.("sources ensured (\\testmelody, \\ts0)");
 };
 
-// enforce Option A + hard-drop NEXT monitor + recreate silent stereo
+// enforce Option A at source level + drop NEXT monitor only (NO source overwrite)
 enforceOptionA_EndNext = {
     var nextSink = ~mpb.nextChain[0];
-    ~mpb.enforceExclusiveCurrentOptionA(0.1);
+    ~mpb.enforceExclusiveCurrentOptionA(0.1);    // class silences NEXT at source
     Server.default.bind({
-        Ndef(nextSink).end;                     // drop monitor/flag
-        Ndef(nextSink, { Silent.ar(2) });       // recreate silent source
-        Ndef(nextSink).mold(2, \audio);         // keep stereo for future switch
+        Ndef(nextSink).end;                      // drop monitor/flag
+        // do NOT change next sink’s source here; class manages it
+        Ndef(nextSink).mold(2, \audio);         // keep shape pinned
     });
-    log.("Option A enforced + NEXT ended & recreated silent");
+    log.("Option A enforced + NEXT ended (monitor dropped)");
 };
 
 // baseline: CURRENT <- \testmelody
@@ -118,7 +131,7 @@ runScenario = {
 
     apply.value("/switch");               // A->B
     step.value(0.35, {
-        enforceOptionA_EndNext.value;     // hard-drop NEXT & recreate silent
+        enforceOptionA_EndNext.value;     // drop NEXT flag only (no source changes)
         ~mpb.printChains;
         assertXor.value(false, true, "after first switch — NEXT→CURRENT");
 
