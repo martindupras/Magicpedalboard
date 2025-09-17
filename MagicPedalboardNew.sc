@@ -1,4 +1,4 @@
-/* MagicPedalboardNew.sc v0.4.4
+/* MagicPedalboardNew.sc v0.4.5
  A/B pedalboard chain manager built on Ndefs.
 
  - Chains are Arrays of Symbols ordered [sink, …, source].
@@ -32,7 +32,7 @@ MagicPedalboardNew : Object {
 
 	*initClass {
 		var text;
-		version = "v0.4.4";
+		version = "v0.4.5";
 		text = "MagicPedalboardNew " ++ version;
 		text.postln;
 	}
@@ -208,6 +208,9 @@ MagicPedalboardNew : Object {
 		if(display.notNil) {
 			display.showPlay(sinkKey);
 		};
+		// enforce exclusive invariant (Option A) after play
+this.enforceExclusiveCurrentOptionA(0.1);
+
 	}
 
 	stopCurrent {
