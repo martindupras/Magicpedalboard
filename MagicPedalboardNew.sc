@@ -93,6 +93,10 @@ MagicPedalboardNew : Object {
 		if(display.notNil) {
 			display.showInit(this, version, currentChain, nextChain);
 		};
+
+		// enforce exclusive invariant (Option A) at first bring-up
+		this.enforceExclusiveCurrentOptionA(0.1);
+
 		^this
 	}
 
@@ -209,7 +213,7 @@ MagicPedalboardNew : Object {
 			display.showPlay(sinkKey);
 		};
 		// enforce exclusive invariant (Option A) after play
-this.enforceExclusiveCurrentOptionA(0.1);
+		this.enforceExclusiveCurrentOptionA(0.1);
 
 	}
 
@@ -259,7 +263,7 @@ this.enforceExclusiveCurrentOptionA(0.1);
 		});
 
 		// enforce exclusivity post-swap (CURRENT uses actualFadeTime, NEXT silenced)
-this.enforceExclusiveCurrentOptionA(actualFadeTime);
+		this.enforceExclusiveCurrentOptionA(actualFadeTime);
 
 		if(display.notNil) {
 			display.showSwitch(oldSinkKey, currentChain[0], currentChain, nextChain);
@@ -430,8 +434,8 @@ this.enforceExclusiveCurrentOptionA(actualFadeTime);
 			this.rebuildUnbound(currentChain);
 		});
 
-// enforce exclusive invariant (Option A): CURRENT audible; NEXT silent
-this.enforceExclusiveCurrentOptionA(0.1);
+		// enforce exclusive invariant (Option A): CURRENT audible; NEXT silent
+		this.enforceExclusiveCurrentOptionA(0.1);
 
 		if(display.notNil) { display.showReset(currentChain, nextChain) };
 	}
