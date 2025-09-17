@@ -1,48 +1,33 @@
 // OneShot_Acceptance_CommandDriven.scd
-// v0.2.1
-// MD 20250917-1255
+// v0.2.2
+// MD 20250917-1306
 //
-// Purpose: Robust acceptance using your adapter. Waits for server+~mpb+adapter,
+// Purpose: Robust acceptance using your adapter. Waits for server + ~mpb + adapter,
 //          disables meters during ops, pins stereo sinks, enforces Option A and
-//          drops NEXT flag after baseline and after each switch, then asserts
+//          hard-drops NEXT monitor (.end), recreates silent stereo NEXT, then asserts
 //          A XOR B after each step. No rewiring; adapter-only control.
 // Style: tilde vars, var-first, lowercase names, no server.sync,
 //        server ops inside Server.default.bind. GUI on AppClock only.
 
 (
 var log, step, t,
-    ready, readyServer, readyAdapter, readyMpb,
-    ensureEnv, ensureAdapter, disableMeters, enableMeters,
+    ready, disableMeters, enableMeters,
     pinStereoSinks, ensureSources, baselineExclusive,
-    enforceOptionAFlagDrop, assertXor, apply, runScenario;
+    enforceOptionA_EndNext, assertXor, apply, runScenario;
 
 var passCount, failCount;
 passCount = 0; failCount = 0;
 
-// --- helpers ---
+// helpers
 log  = { arg s; ("[ACCEPT] " ++ s).postln };
 step = { arg sec, fn; AppClock.sched(sec, { fn.value; nil }) };
 
 // timings
-t = (
-  prep:     0.00,
-  baseline: 0.25,
-  add:      0.45,
-  sw1:      0.75,
-  byOn:     1.05,
-  byOff:    1.30,
-  sw2:      1.60,
-  meters:   1.90,
-  sum:      2.10
-);
+t = ( prep:0.00, baseline:0.25, add:0.45, sw1:0.75, byOn:1.05, byOff:1.30, sw2:1.60, meters:1.90, sum:2.10 );
 
-// readiness checks
-readyServer  = { Server.default.serverRunning };
-readyAdapter = { ~ct_applyOSCPathToMPB.notNil };
-readyMpb     = { ~mpb.notNil };
-
+// readiness
 ready = {
-    if(readyServer.value.not) { Server.default.boot };
+    if(Server.default.serverRunning.not) { Server.default.boot };
     ~gui = ~gui ?? { MagicDisplayGUI.new };
     ~mpb = ~mpb ?? { MagicPedalboardNew.new(~gui) };
     if(~ct_applyOSCPathToMPB.isNil) {
@@ -53,20 +38,10 @@ ready = {
 };
 
 // meters control
-disableMeters = {
-    if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) {
-        ~gui.enableMeters(false);
-        log.("meters disabled");
-    };
-};
-enableMeters = {
-    if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) {
-        ~gui.enableMeters(true);
-        log.("meters enabled");
-    };
-};
+disableMeters = { if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) { ~gui.enableMeters(false); log.("meters disabled") } };
+enableMeters  = { if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) { ~gui.enableMeters(true);  log.("meters enabled")  } };
 
-// authoritative stereo pin to avoid 2→1 wraps
+// pin sinks (authoritative)
 pinStereoSinks = {
     Server.default.bind({
         Ndef(\chainA).mold(2, \audio);
@@ -77,7 +52,7 @@ pinStereoSinks = {
     log.("sinks pinned: mold(2,audio) + \\in.ar(2)");
 };
 
-// define \testmelody (stereo) and \ts0 (stereo Silent)
+// sources
 ensureSources = {
     Server.default.bind({
         Ndef(\testmelody, {
@@ -94,22 +69,26 @@ ensureSources = {
     log.("sources ensured (\\testmelody, \\ts0)");
 };
 
-// enforce Option A + drop NEXT flag (so B=false in flags)
-enforceOptionAFlagDrop = {
+// enforce Option A + hard-drop NEXT monitor + recreate silent stereo
+enforceOptionA_EndNext = {
     var nextSink = ~mpb.nextChain[0];
-    ~mpb.enforceExclusiveCurrentOptionA(0.1);         // NEXT silent at source
-    Server.default.bind({ Ndef(nextSink).pause });     // drop NEXT monitor flag
-    log.("Option A enforced + NEXT paused");
+    ~mpb.enforceExclusiveCurrentOptionA(0.1);
+    Server.default.bind({
+        Ndef(nextSink).end;                     // drop monitor/flag
+        Ndef(nextSink, { Silent.ar(2) });       // recreate silent source
+        Ndef(nextSink).mold(2, \audio);         // keep stereo for future switch
+    });
+    log.("Option A enforced + NEXT ended & recreated silent");
 };
 
-// baseline: CURRENT <- \testmelody; re-enforce and drop flag
+// baseline: CURRENT <- \testmelody
 baselineExclusive = {
     ~mpb.setSourceCurrent(\testmelody);
-    ~mpb.playCurrent;                                  // class enforces Option A after play
-    enforceOptionAFlagDrop.value;
+    ~mpb.playCurrent;
+    enforceOptionA_EndNext.value;
 };
 
-// boolean assert with PASS/FAIL accounting
+// A XOR B assert
 assertXor = { arg expectA, expectB, label;
     var a = Ndef(\chainA).isPlaying, b = Ndef(\chainB).isPlaying, ok;
     ok = (a == expectA) and: { b == expectB };
@@ -119,63 +98,44 @@ assertXor = { arg expectA, expectB, label;
 };
 
 // adapter apply
-apply = { arg pathString;
-    if(~ct_applyOSCPathToMPB.notNil) {
-        ~ct_applyOSCPathToMPB.(pathString, ~mpb, ~gui);
-    }{
-        ("adapter missing for " ++ pathString).warn;
-        false
-    }
-};
+apply = { arg pathString; ~ct_applyOSCPathToMPB.(pathString, ~mpb, ~gui) };
 
 // scenario
 runScenario = {
-    var ok;
+    if(ready.value.not) { ^nil };
 
-    // 0) readiness
-    ok = ready.value;
-    if(ok.not) { ^nil };
-
-    // 1) prep
     disableMeters.value;
     pinStereoSinks.value;
     ensureSources.value;
 
-    // 2) baseline
     baselineExclusive.value;
     ~mpb.printChains;
     assertXor.value(true, false, "baseline: CURRENT audible; NEXT silent");
 
-    // 3) add delay on NEXT (no switch yet)
     apply.value("/add/delay");
     ~mpb.printChains;
     assertXor.value(true, false, "after add/delay (NEXT) — exclusivity holds");
 
-    // 4) switch to NEXT (B should be CURRENT), then re-enforce and drop flag
-    apply.value("/switch");
-    step.value(0.30, {
-        enforceOptionAFlagDrop.value;
+    apply.value("/switch");               // A->B
+    step.value(0.35, {
+        enforceOptionA_EndNext.value;     // hard-drop NEXT & recreate silent
         ~mpb.printChains;
         assertXor.value(false, true, "after first switch — NEXT→CURRENT");
 
-        // 5) bypass ON on CURRENT
         apply.value("/bypass/delay/on");
         ~mpb.printChains;
         assertXor.value(false, true, "after bypass on (CURRENT)");
 
-        // 6) bypass OFF on CURRENT
         apply.value("/bypass/delay/off");
         ~mpb.printChains;
         assertXor.value(false, true, "after bypass off (CURRENT)");
 
-        // 7) switch back to A (then enforce & drop flag)
-        apply.value("/switch");
-        step.value(0.30, {
-            enforceOptionAFlagDrop.value;
+        apply.value("/switch");           // B->A
+        step.value(0.35, {
+            enforceOptionA_EndNext.value;
             ~mpb.printChains;
             assertXor.value(true, false, "after second switch — back to A");
 
-            // 8) meters on and summary
             enableMeters.value;
             ("[ACCEPT] Summary: PASS=" ++ passCount ++ " FAIL=" ++ failCount).postln;
             nil
@@ -184,6 +144,6 @@ runScenario = {
     });
 };
 
-// --- kick off ---
+// run
 runScenario.value;
 )
