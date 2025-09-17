@@ -1,3 +1,174 @@
+// OneShot_BringUp_MagicPedalboardNew_GUI_Meters.scd
+// v0.1
+// MD 20250916-1608
+
+//
+// Purpose: single‑run bring‑up to audible baseline; robust sinks;
+//          retarget meters; quick FX switch demo.
+// Style: tilde vars, var-first, lowercase names, no server.sync,
+//        server ops inside Server.default.bind.
+
+(
+var log, step, delayA, doBoot, ensureSinks, ensureGuiMpb, ensureSource,
+    enforceExclusiveCurrent, ensureMetersOk, verifyState, demoFx;
+
+log = { arg messageString; ("[BRINGUP] " ++ messageString).postln };
+
+step = { arg seconds, fn;
+    AppClock.sched(seconds, { fn.value; nil })
+};
+
+// --- timings (seconds) ---
+delayA = (
+    boot:     0.00,
+    sinks:    0.40,
+    guiMpb:   0.55,
+    source:   0.75,
+    current:  0.95,
+    meters:   1.15,
+    verify:   1.35,
+    demo:     1.75
+);
+
+// 1) Boot audio (safe to call repeatedly)
+doBoot = {
+    log.("boot audio");
+    Server.default.boot;
+};
+
+// 2) Robust sinks + AR buses (ensures sinks actually consume \in)
+ensureSinks = {
+    log.("ensure sinks are robust and audio‑rate");
+    Server.default.bind({
+        Ndef(\chainA, { \in.ar(2) });
+        Ndef(\chainB, { \in.ar(2) });
+        Ndef(\chainA).ar(2);
+        Ndef(\chainB).ar(2);
+    });
+};
+
+// 3) Ensure GUI + MPB (reuse if present)
+ensureGuiMpb = {
+    log.("ensure GUI + pedalboard");
+    ~gui = ~gui ?? { MagicDisplayGUI.new };
+    ~mpb = ~mpb ?? { MagicPedalboardNew.new(~gui) };
+};
+
+// 4) Musical internal source + AR (guaranteed audible)
+ensureSource = {
+    log.("define \\testmelody source (stereo)");
+    Server.default.bind({
+        Ndef(\testmelody, {
+            var trig, seq, f, env, tone, panPos;
+            trig = Impulse.kr(3.2);
+            seq  = Dseq([220, 277.18, 329.63, 392, 329.63, 277.18, 246.94], inf);
+            f    = Demand.kr(trig, 0, seq);
+            env  = Decay2.kr(trig, 0.01, 0.35);
+            tone = SinOsc.ar(f) * env * 0.25;
+            panPos = ToggleFF.kr(trig).linlin(0, 1, -0.6, 0.6);
+            Pan2.ar(tone, panPos)
+        });
+        Ndef(\testmelody).ar(2);
+    });
+};
+
+// 5) CURRENT <- testmelody; play CURRENT; stop NEXT
+enforceExclusiveCurrent = {
+    log.("set CURRENT source and enforce exclusive playback");
+    ~mpb.setSourceCurrent(\testmelody);
+    ~mpb.playCurrent;
+    Server.default.bind({
+        if(Ndef(\chainB).isPlaying) { Ndef(\chainB).stop };
+        if(Ndef(\chainA).isPlaying.not) { Ndef(\chainA).play(numChannels: 2) };
+    });
+};
+
+// 6) Retarget meters after sinks are definitely AR
+ensureMetersOk = {
+    if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) {
+        log.("retarget meters (off -> on)");
+        ~gui.enableMeters(false);
+        ~gui.enableMeters(true);
+    }{
+        log.("no GUI or enableMeters missing; skipping meter retarget");
+    };
+};
+
+// 7) Verify state (posts chain details and playing flags)
+verifyState = {
+    log.("verify state");
+    ~mpb.printChains;
+    AppClock.sched(0.15, {
+        var aPlaying, bPlaying, line;
+        aPlaying = Ndef(\chainA).isPlaying;
+        bPlaying = Ndef(\chainB).isPlaying;
+        line = "[PLAY] A=%  B=%".format(aPlaying, bPlaying);
+        line.postln;
+        nil
+    });
+};
+
+// 8) Demo FX: ensure \delay exists, add to NEXT, switch with short xfade
+demoFx = {
+    log.("demo FX: add \\delay to NEXT, then switch (0.12s)");
+    Server.default.bind({
+        Ndef(\delay, { |time=0.45, fb=0.35, mix=0.5|
+            var sig = \in.ar(2);
+            var delayed = CombC.ar(sig, 2.0, time.clip(0.01, 2.0), time * (fb.clip(0,0.95) * 6 + 0.1));
+            XFade2.ar(sig, delayed, (mix.clip(0,1) * 2 - 1))
+        });
+        Ndef(\delay).ar(2);
+    });
+    ~mpb.add(\delay);        // add to NEXT
+    ~mpb.switchChain(0.12);  // crossfade to hear delay
+    ~mpb.printChains;
+};
+
+// --- schedule the steps (no server.sync; UI remains responsive) ---
+log.("starting bring‑up sequence");
+step.(delayA[\boot],    { doBoot.value });
+step.(delayA[\sinks],   { ensureSinks.value });
+step.(delayA[\guiMpb],  { ensureGuiMpb.value });
+step.(delayA[\source],  { ensureSource.value });
+step.(delayA[\current], { enforceExclusiveCurrent.value });
+step.(delayA[\meters],  { ensureMetersOk.value });
+step.(delayA[\verify],  { verifyState.value });
+step.(delayA[\demo],    { demoFx.value });
+
+)
+// Probe_Ndef_SinkState.scd
+// v0.1
+// MD 20250916-1700
+
+//
+// Purpose: Safely inspect a sink Ndef’s current source object and playing/paused/monitor status.
+//          Uses .source (not .sourceCode) and prints class + optional asCompileString if available.
+// Style:   tilde vars, var-first, lowercase names, no server.sync, Server.default.bind for server ops.
+
+(
+var key, nx, srcObj, srcClass, srcCode, mon, playing, paused;
+
+key = \chainB; // change to \chainA if you want to probe A
+
+nx       = Ndef(key);
+srcObj   = nx.source;                 // current source object (Function or other)
+srcClass = srcObj.class;
+srcCode  = srcObj.tryPerform(\asCompileString); // may be nil if not supported
+mon      = nx.monitor;                // monitor object (if any)
+playing  = nx.isPlaying;
+paused   = nx.paused ? false;         // NodeProxy sometimes keeps paused flag internally
+
+("[PROBE] key=%  class=%  playing=%  paused=%  hasMonitor=%"
+    .format(key, srcClass, playing, paused, mon.notNil)).postln;
+
+if(srcCode.notNil) {
+    "[PROBE] source asCompileString:".postln;
+    srcCode.postln;
+} {
+    "[PROBE] source does not implement asCompileString; printing .source:".postln;
+    srcObj.postln;
+};
+)
 // acceptanceStepsTest.scd
 // v0.1
 // MD 20250916
@@ -130,6 +301,114 @@
 ~ct_sendAndApply = { arg commandManager, pedalboard, gui;
     ~ct_applyQueueToMPBFromCM.(commandManager, pedalboard, gui);
 };
+)
+// audibleSanity.scd
+// v0.2
+// MD 20250916
+
+(
+// --- A) Boot and define an internal source (stereo) ---
+var ensureAudio, defineTestSource, overrideTs0, ensureGuiAndPedalboard, startCurrent, verify;
+
+ensureAudio = {
+    Server.default.boot;
+};
+
+defineTestSource = {
+    Server.default.bind({
+        Ndef(\testmelody, {
+            var trig, seq, f, env, tone, panPos;
+            trig = Impulse.kr(3.2);
+            seq  = Dseq([220, 277.18, 329.63, 392, 329.63, 277.18, 246.94], inf);
+            f    = Demand.kr(trig, 0, seq);
+            env  = Decay2.kr(trig, 0.01, 0.35);
+            tone = SinOsc.ar(f) * env * 0.25;
+            panPos = ToggleFF.kr(trig).linlin(0, 1, -0.6, 0.6);
+            Pan2.ar(tone, panPos)
+        });
+        Ndef(\testmelody).ar(2);
+    });
+};
+
+// --- B) Force ts0 to be internal (NOT SoundIn) for all tests today ---
+overrideTs0 = {
+    Server.default.bind({
+        Ndef(\ts0, {
+            var trig, seq, f, env, tone, panPos;
+            trig = Impulse.kr(3.0);
+            seq  = Dseq([196, 246.94, 329.63, 261.63, 329.63, 246.94], inf);
+            f    = Demand.kr(trig, 0, seq);
+            env  = Decay2.kr(trig, 0.01, 0.40);
+            tone = Pulse.ar(f, 0.5) * env * 0.20;
+            panPos = LFTri.kr(0.1).linlin(-1, 1, -0.5, 0.5);
+            Pan2.ar(tone, panPos)
+        });
+        Ndef(\ts0).ar(2);
+    });
+};
+
+// --- C) GUI + Pedalboard, sinks ar(2), meters on ---
+ensureGuiAndPedalboard = {
+    ~gui = ~gui ?? { MagicDisplayGUI.new };
+    ~mpb = ~mpb ?? { MagicPedalboardNew.new(~gui) };
+
+    Server.default.bind({
+        Ndef(\chainA).ar(2);
+        Ndef(\chainB).ar(2);
+    });
+
+    // toggle meters cleanly once (your enableMeters now guards for audio-rate + server)
+    ~gui.enableMeters(false);
+    ~gui.enableMeters(true);
+};
+
+// --- D) Set CURRENT source to internal generator and play ---
+startCurrent = {
+    ~mpb.setSourceCurrent(\testmelody); // generated source
+    ~mpb.playCurrent;
+};
+
+// --- E) Verify status ---
+verify = {
+    ~mpb.printChains;
+    ("[sanity] chainA.isPlaying=% chainB.isPlaying=%"
+        .format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
+};
+
+ensureAudio.value;
+defineTestSource.value;
+overrideTs0.value;
+ensureGuiAndPedalboard.value;
+startCurrent.value;
+verify.value;
+)
+// bootstrap_audio_and_fx_min.scd
+// v0.1
+
+(
+Server.default.boot;
+Server.default.bind({
+    // Musical test source (stereo) – guaranteed audibility
+    Ndef(\testmelody, {
+        var trig = Impulse.kr(3.2);
+        var seq  = Dseq([220, 277.18, 329.63, 392, 329.63, 277.18, 246.94], inf);
+        var f    = Demand.kr(trig, 0, seq);
+        var env  = Decay2.kr(trig, 0.01, 0.35);
+        var tone = SinOsc.ar(f) * env * 0.25;
+        var pan  = ToggleFF.kr(trig).linlin(0, 1, -0.6, 0.6);
+        Pan2.ar(tone, pan)
+    });
+    Ndef(\testmelody).ar(2);
+
+    // Minimal \delay (stereo) – matches your style using \in.ar
+    Ndef(\delay, { |in, time=0.45, fb=0.35, mix=0.5|
+        var sig    = \in.ar(2);
+        var delayed= CombC.ar(sig, 2.0, time.clip(0.01, 2.0),
+                              time * (fb.clip(0.0, 0.95) * 6 + 0.1));
+        XFade2.ar(sig, delayed, mix.clip(0,1) * 2 - 1)
+    });
+    Ndef(\delay).ar(2);
+});
 )
 // demo_apply_after_fix.scd
 // v0.1
@@ -523,6 +802,7 @@ while({ indexCounter < totalCount }, {
 });
 )
 // diag_manual_chain_patch.scd
+// v0.2 fixes <<>
 // v0.1
 // MD 20250916-1018
 
@@ -536,11 +816,26 @@ Server.default.bind({
     Ndef(\chainA, { \in.ar(2) });
 
     // patch toneTest -> chainA and play chainA
-    Ndef(\chainA) <<>> Ndef(\toneTest);
+    Ndef(\chainA) <<> Ndef(\toneTest);
     Ndef(\chainA).play;
 });
 
 log.("Manual patch: chainA <<>> toneTest; chainA.play — you should hear steady tone now.");
+)
+// diag_more_state.scd
+// v0.1
+
+(
+~mpb.printChains;
+
+[
+    [\testmelody,  Ndef(\testmelody).source.notNil,  Ndef(\testmelody).isPlaying],
+    [\delay,       Ndef(\delay).source.notNil,       Ndef(\delay).isPlaying],
+    [\chainA,      Ndef(\chainA).source.notNil,      Ndef(\chainA).isPlaying],
+    [\chainB,      Ndef(\chainB).source.notNil,      Ndef(\chainB).isPlaying]
+].do({ arg row;
+    ("[NODE] " ++ row[0] ++ " source?=" ++ row[1] ++ " playing?=" ++ row[2]).postln;
+});
 )
 // diag_mpb_audio_path.scd
 // v0.1
@@ -576,9 +871,9 @@ playDirect = {
 patchChainManually = {
     // ensure chainA exists
     Ndef(\chainA, { \in.ar(2) });
-    Ndef(\chainA) <<>> Ndef(\toneTest);
+    Ndef(\chainA) <<> Ndef(\toneTest);
     Ndef(\chainA).play;
-    log.("Manual patch: chainA <<>> toneTest; chainA.play — you should still hear tone.");
+    log.("Manual patch: chainA <<> toneTest; chainA.play — you should still hear tone.");
 };
 
 // D) Pedalboard flow: reset -> setSource -> **playCurrent** (explicit) -> print
@@ -627,6 +922,39 @@ log = { arg msg; ("[DIAG] " ++ msg).postln };
 ~pedalboard.printChains;
 
 log.("Pedalboard: reset -> setSource toneTest -> playCurrent — you should hear steady tone now.");
+)
+// diag_verify_chain_and_defs.scd
+// v0.1
+
+(
+var listOne, listTwo, lastIndex, checkList, report;
+
+if(~mpb.isNil) { "[DIAG] ~mpb is nil".warn; ^nil };
+
+checkList = { arg label, chainList;
+    var idx, last, missing;
+    if(chainList.isNil) { ("[DIAG] " ++ label ++ ": chain is nil").postln; ^nil };
+    last = chainList.size - 1;
+    missing = Array.new;
+    idx = 1; // processors are 1 .. last-1
+    while({ idx < last }, {
+        var key = chainList[idx];
+        var hasDef = Ndef(key).source.notNil;  // <- definition present?
+        if(hasDef.not) { missing = missing.add(key) };
+        idx = idx + 1;
+    });
+    ("[DIAG] " ++ label ++ " = " ++ chainList).postln;
+    if(missing.isEmpty) { "[DIAG] all processors have sources".postln }
+    { ("[DIAG] missing sources for: " ++ missing).warn };
+};
+
+listOne = ~mpb.effectiveCurrent;
+listTwo = ~mpb.effectiveNext;
+
+checkList.("CURRENT", listOne);
+checkList.("NEXT   ", listTwo);
+
+"[[PLAY]] A=%  B=%".format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying).postln;
 )
 // editor_commandtree_add_demo_verbs.scd
 // v0.3
@@ -702,6 +1030,88 @@ ensurePath.(["commands","setSource","testmelody"], [10,4,1]);
 
 // save using custom exporter (preserves payloads in JSON)
 ~ct_writeJsonWithPayloads.(~tree, jsonPath, true, saveFolder, savePrefix);
+)
+// Enforce_ExclusiveBySilencingNext.scd
+// v0.2
+// MD 20250916-1714
+
+//
+// Purpose: Guarantee audible exclusivity immediately by silencing the NEXT sink’s source.
+//          CURRENT remains { \in.ar(2) } and audible; NEXT is set to Silent.ar(2). This avoids
+//          NodeProxy monitor tail/race issues where isPlaying may remain true on NEXT.
+// Style: tilde vars, var-first, lowercase names, no server.sync,
+//        server ops inside Server.default.bind.
+
+(
+var log, getCurrentNextSinks, silenceNextSink, ensureCurrentAudible, retargetMeters, verify, sinks;
+
+log = { arg messageString; ("[XONLY] " ++ messageString).postln; };
+
+// Identify sink symbols for CURRENT and NEXT from ~mpb
+getCurrentNextSinks = {
+    if(~mpb.isNil) {
+        "[XONLY] ~mpb is nil".warn;
+        ^nil
+    };
+    ^(
+        current: ~mpb.effectiveCurrent[0],   // \chainA or \chainB
+        next:    ~mpb.effectiveNext[0]       // the other one
+    )
+};
+
+// Replace NEXT sink source with silence; keep bus AR so meters won’t warn
+silenceNextSink = { arg nextSinkSym;
+    Server.default.bind({
+        Ndef(nextSinkSym, { Silent.ar(2) });  // hard silence at the sink
+        Ndef(nextSinkSym).ar(2);
+        Ndef(nextSinkSym).fadeTime_(0.01);
+        Ndef(nextSinkSym).stop;               // stop its monitor quickly (optional)
+    });
+    log.("NEXT " ++ nextSinkSym.asString ++ " silenced");
+};
+
+// Ensure CURRENT uses robust sink source and is playing
+ensureCurrentAudible = { arg currentSinkSym;
+    Server.default.bind({
+        Ndef(currentSinkSym, { \in.ar(2) });
+        Ndef(currentSinkSym).ar(2);
+        Ndef(currentSinkSym).fadeTime_(0.05);
+        if(Ndef(currentSinkSym).isPlaying.not) {
+            Ndef(currentSinkSym).play(numChannels: 2);
+        };
+    });
+    log.("CURRENT " ++ currentSinkSym.asString ++ " robust+playing");
+};
+
+// Reattach meters safely after AR guarantee
+retargetMeters = {
+    if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) {
+        ~gui.enableMeters(false);
+        ~gui.enableMeters(true);
+    };
+};
+
+// Post final state a moment later
+verify = {
+    ~mpb.printChains;
+    AppClock.sched(0.25, {
+        var aPlaying, bPlaying, lineText;
+        aPlaying = Ndef(\chainA).isPlaying;
+        bPlaying = Ndef(\chainB).isPlaying;
+        lineText = "[PLAY] A=%  B=%".format(aPlaying, bPlaying);
+        lineText.postln;
+        nil
+    });
+};
+
+// --- run ---
+sinks = getCurrentNextSinks.value;
+if(sinks.notNil) {
+    ensureCurrentAudible.(sinks[\current]);
+    silenceNextSink.(sinks[\next]);
+    retargetMeters.value;
+    verify.value;
+};
 )
 // enforceExclusiveCurrentNow.scd
 // v0.2
@@ -825,6 +1235,165 @@ Server.default.bind({
 [\testmelody, \chainA, \chainB, \delay, \chorus].do({ arg nm;
     ("[PLAY] " ++ nm ++ " = " ++ Ndef(nm).isPlaying).postln;
 });
+)
+// Fix_ExclusiveCurrent_EnforceNow.scd
+// v0.3
+// MD 20250916-1700
+
+//
+// Purpose: Force “CURRENT=A playing, NEXT=B stopped” deterministically, even if a prior crossfade
+//          or monitor tail keeps B reporting ‘playing’. Handles stop→pause→(last‑resort) clear+restore.
+// Style:   tilde vars, var-first, lowercase names, no server.sync, Server.default.bind for server ops.
+
+(
+var log, phase1_stopWithShortFade, phase2_pauseIfStill, phase3_lastResort, startAIfNeeded, verifyFinal;
+
+log = { arg s; ("[FIX] " ++ s).postln; };
+
+// Phase 1: small fades, stop B (start fade-down)
+phase1_stopWithShortFade = {
+    Server.default.bind({
+        Ndef(\chainA).fadeTime_(0.05);
+        Ndef(\chainB).fadeTime_(0.01);
+        Ndef(\chainB).stop;
+    });
+    log.("phase1: set fade A=0.05 B=0.01; B.stop");
+};
+
+// Phase 2: after short wait, pause B (hard drop of monitor) and ensure A is playing
+phase2_pauseIfStill = {
+    AppClock.sched(0.12, {
+        Server.default.bind({
+            if(Ndef(\chainB).isPlaying) { Ndef(\chainB).pause };  // kills monitor immediately
+            if(Ndef(\chainA).isPlaying.not) { Ndef(\chainA).play(numChannels: 2) };
+        });
+        log.("phase2: B.pause (if needed), A.play (if needed)");
+        nil
+    });
+};
+
+// Phase 3: last resort — if B still reports playing, clear + restore robust sink source
+phase3_lastResort = {
+    AppClock.sched(0.26, {
+        if(Ndef(\chainB).isPlaying) {
+            log.("phase3: B still playing -> clear+restore sink");
+            Server.default.bind({
+                // Replace B’s source with robust \in.ar(2) and reassert AR bus
+                Ndef(\chainB).clear(0);
+                Ndef(\chainB, { \in.ar(2) });
+                Ndef(\chainB).ar(2);
+            });
+        };
+        nil
+    });
+};
+
+// Safety: if A not playing after everything, start it
+startAIfNeeded = {
+    AppClock.sched(0.30, {
+        Server.default.bind({
+            if(Ndef(\chainA).isPlaying.not) { Ndef(\chainA).play(numChannels: 2) };
+            // ensure B is not audible
+            if(Ndef(\chainB).isPlaying) { Ndef(\chainB).pause };
+        });
+        nil
+    });
+};
+
+// Final verification
+verifyFinal = {
+    AppClock.sched(0.35, {
+        var a, b;
+        a = Ndef(\chainA).isPlaying;
+        b = Ndef(\chainB).isPlaying;
+        ("[PLAY] A=%  B=%".format(a, b)).postln;
+        nil
+    });
+};
+
+// Run the phases
+phase1_stopWithShortFade.value;
+phase2_pauseIfStill.value;
+phase3_lastResort.value;
+startAIfNeeded.value;
+verifyFinal.value;
+)
+// helper_recover_if_silent.scd
+// v0.2
+
+(
+~recoverLog = ~recoverLog ?? { arg messageString;
+    ("[RECOVER] " ++ messageString).postln;
+};
+
+~recoverIfSilent = {
+    var ensureStereo, connectPair, connectList, currentEff, nextEff;
+    var currentSink, nextSink, indexCounter, lastIndex;
+
+    if(~mpb.isNil) { ~recoverLog.("~mpb is nil"); ^false };
+
+    // Temporarily disable meters to avoid control-rate warnings during repair
+    if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) { ~gui.enableMeters(false) };
+
+    // Ensure sinks are audio-rate
+    Server.default.bind({
+        Ndef(\chainA).ar(2);
+        Ndef(\chainB).ar(2);
+    });
+
+    // Effective lists from pedalboard
+    currentEff = ~mpb.effectiveCurrent;
+    nextEff    = ~mpb.effectiveNext;
+
+    ensureStereo = { arg keySymbol; Ndef(keySymbol).ar(2) };
+
+    connectPair = { arg leftKey, rightKey;
+        // matches project operator direction: left receives right
+        Server.default.bind({ Ndef(leftKey) <<> Ndef(rightKey) });
+    };
+
+    connectList = { arg listSymbols;
+        indexCounter = 0;
+        lastIndex = listSymbols.size - 1;
+        while({ indexCounter < lastIndex }, {
+            var leftKey, rightKey;
+            leftKey  = listSymbols[indexCounter];
+            rightKey = listSymbols[indexCounter + 1];
+            ensureStereo.(leftKey);
+            ensureStereo.(rightKey);
+            connectPair.(leftKey, rightKey);
+            indexCounter = indexCounter + 1;
+        });
+    };
+
+    // Rebuild both chains end-to-end
+    connectList.(currentEff);
+    connectList.(nextEff);
+
+    // Enforce: CURRENT plays, NEXT stopped
+    currentSink = currentEff[0];
+    nextSink    = nextEff[0];
+    Server.default.bind({
+        if(Ndef(nextSink).isPlaying)        { Ndef(nextSink).stop };
+        if(Ndef(currentSink).isPlaying.not) { Ndef(currentSink).play(numChannels: 2) };
+    });
+
+    // Re-enable meters (after AR is guaranteed)
+    if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) { ~gui.enableMeters(true) };
+
+    ~recoverLog.("reconnected. currentEff=" ++ currentEff ++ " nextEff=" ++ nextEff);
+
+    // Status a moment later (no server.sync)
+    AppClock.sched(0.20, {
+        var aPlaying, bPlaying, line;
+        aPlaying = Ndef(\chainA).isPlaying;
+        bPlaying = Ndef(\chainB).isPlaying;
+        line = "[status] A.playing=% B.playing=%".format(aPlaying, bPlaying);
+        line.postln; nil
+    });
+
+    true
+};
 )
 // fix_current_only_now.scd
 // v0.1
@@ -1147,6 +1716,334 @@ if(~lastProcIdx >= 1) { ~pedalboard.removeAt(~lastProcIdx); ~pedalboard.addAt(\d
 ~assertEnds = { arg list, key;
     if(list.last != key) { ("ASSERT last must be " ++ key).postln };
 };
+// OneShot_Acceptance_SwitchDelay.scd
+// v0.1
+// MD 20250916-1618
+
+// Purpose: Automated acceptance: baseline -> add \delay to NEXT -> switch (0.12s) -> verify exclusive playback and chain contents; includes basic PASS/FAIL counting and GUI meter retarget.
+// Style: tilde vars, var-first, lowercase names, no server.sync, Server.default.bind for server ops.
+
+(
+var log, passCount, failCount, assertTrue, step, timePlan, ensureSinks, ensureGuiMpb, ensureSource, ensureDelayProc, verifyExclusive, runScenario;
+
+log = { arg s; ("[ACCEPT] " ++ s).postln };
+
+passCount = 0; failCount = 0;
+assertTrue = { arg cond, label;
+    var text;
+    text = if(cond) { "PASS" } { "FAIL" };
+    ("[ACCEPT] " ++ text ++ " — " ++ label).postln;
+    if(cond) { passCount = passCount + 1 } { failCount = failCount + 1 };
+};
+
+step = { arg sec, fn; AppClock.sched(sec, { fn.value; nil }) };
+
+timePlan = ( sinks:0.05, gui:0.10, source:0.20, meters:0.30, baseline:0.45, add:0.60, switch:0.80, verify2:1.10, bypassOn:1.30, bypassOff:1.50, switchBack:1.70, summary:1.95 );
+
+// 1) Robust sinks (consumes \in) + AR buses
+ensureSinks = {
+    log.("ensure sinks robust + audio-rate");
+    Server.default.bind({
+        Ndef(\chainA, { \in.ar(2) });
+        Ndef(\chainB, { \in.ar(2) });
+        Ndef(\chainA).ar(2);
+        Ndef(\chainB).ar(2);
+    });
+};
+
+// 2) GUI + MPB
+ensureGuiMpb = {
+    log.("ensure GUI + MPB");
+    ~gui = ~gui ?? { MagicDisplayGUI.new };
+    ~mpb = ~mpb ?? { MagicPedalboardNew.new(~gui) };
+};
+
+// 3) Known-good internal source
+ensureSource = {
+    log.("define \\testmelody");
+    Server.default.bind({
+        Ndef(\testmelody, {
+            var trig, seq, f, env, tone, panPos;
+            trig = Impulse.kr(3.2);
+            seq  = Dseq([220, 277.18, 329.63, 392, 329.63, 277.18, 246.94], inf);
+            f    = Demand.kr(trig, 0, seq);
+            env  = Decay2.kr(trig, 0.01, 0.35);
+            tone = SinOsc.ar(f) * env * 0.25;
+            panPos = ToggleFF.kr(trig).linlin(0, 1, -0.6, 0.6);
+            Pan2.ar(tone, panPos)
+        });
+        Ndef(\testmelody).ar(2);
+    });
+};
+
+// 4) Ensure proc (\delay) exists (stereo)
+ensureDelayProc = {
+    log.("ensure \\delay processor exists");
+    Server.default.bind({
+        Ndef(\delay, { |time=0.45, fb=0.35, mix=0.5|
+            var sig = \in.ar(2);
+            var delayed = CombC.ar(sig, 2.0, time.clip(0.01,2.0), time * (fb.clip(0,0.95)*6 + 0.1));
+            XFade2.ar(sig, delayed, (mix.clip(0,1) * 2 - 1))
+        });
+        Ndef(\delay).ar(2);
+    });
+};
+
+// helper: verify exclusive CURRENT (A XOR B playing)
+verifyExclusive = { arg expectAPlaying, expectBPlaying, label;
+    var a, b, match;
+    a = Ndef(\chainA).isPlaying;
+    b = Ndef(\chainB).isPlaying;
+    match = (a == expectAPlaying) and: { b == expectBPlaying };
+    assertTrue.(match, label ++ " (A=" ++ a ++ " B=" ++ b ++ ")");
+};
+
+// 5) Scenario: baseline -> add \delay (NEXT) -> switch -> verify -> bypass current on/off -> switch back
+runScenario = {
+    log.("baseline: CURRENT <- \\testmelody; play A, stop B; meters reattach");
+    ~mpb.setSourceCurrent(\testmelody);
+    ~mpb.playCurrent;
+    Server.default.bind({
+        if(Ndef(\chainB).isPlaying) { Ndef(\chainB).stop };
+        if(Ndef(\chainA).isPlaying.not) { Ndef(\chainA).play(numChannels: 2) };
+    });
+    if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) { ~gui.enableMeters(false); ~gui.enableMeters(true) };
+
+    ~mpb.printChains;
+    verifyExclusive.(true, false, "baseline exclusive: A=true, B=false");
+
+    log.("add \\delay to NEXT, then switch (0.12s)");
+    ~mpb.add(\delay);
+    ~mpb.printChains;
+    ~mpb.switchChain(0.12);
+
+    // verify after fade
+    step.(0.25, {
+        verifyExclusive.(false, true, "after switch: A=false, B=true");
+        ~mpb.printChains;
+
+        log.("bypassCurrent(\\delay, true) then false");
+        ~mpb.bypassCurrent(\delay, true);
+        ~mpb.printChains;
+        ~mpb.bypassCurrent(\delay, false);
+        ~mpb.printChains;
+
+        log.("switch back to A");
+        ~mpb.switchChain(0.12);
+
+        step.(0.25, {
+            verifyExclusive.(true, false, "after switch-back: A=true, B=false");
+            ("[ACCEPT] Summary: PASS=" ++ passCount ++ " FAIL=" ++ failCount).postln;
+        });
+    });
+};
+
+// --- run sequence (no server.sync; AppClock timing) ---
+Server.default.boot;
+step.(timePlan[\sinks], { ensureSinks.value });
+step.(timePlan[\gui],   { ensureGuiMpb.value });
+step.(timePlan[\source],{ ensureSource.value });
+step.(timePlan[\meters],{ if(~gui.notNil, { ~gui.enableMeters(false); ~gui.enableMeters(true) }) });
+step.(timePlan[\baseline], { runScenario.value });
+
+)
+// OneShot_BringUp_MinimalOnly.scd
+// v0.1
+// MD 20250916-1608
+
+(
+// =========================================================
+
+// Purpose: bring up to a clean audible baseline (no FX demo);
+//          robust sinks; retarget meters; verify.
+// Style: tilde vars, var-first, lowercase names, no server.sync,
+//        server ops inside Server.default.bind.
+
+// =========================================================
+
+var log, step, t, doBoot, ensureSinks, ensureGuiMpb, ensureSource,
+    enforceExclusiveCurrent, ensureMetersOk, verifyState;
+
+log = { arg s; ("[BRINGUP] " ++ s).postln };
+step = { arg sec, fn; AppClock.sched(sec, { fn.value; nil }) };
+
+// timings
+t = ( boot:0.00, sinks:0.40, guiMpb:0.55, source:0.75, current:0.95, meters:1.15, verify:1.35 );
+
+doBoot = { log.("boot audio"); Server.default.boot; };
+
+ensureSinks = {
+    log.("ensure sinks robust + AR");
+    Server.default.bind({
+        Ndef(\chainA, { \in.ar(2) }); Ndef(\chainB, { \in.ar(2) });
+        Ndef(\chainA).ar(2);          Ndef(\chainB).ar(2);
+    });
+};
+
+ensureGuiMpb = {
+    log.("ensure GUI + MPB");
+    ~gui = ~gui ?? { MagicDisplayGUI.new };
+    ~mpb = ~mpb ?? { MagicPedalboardNew.new(~gui) };
+};
+
+ensureSource = {
+    log.("define \\testmelody (stereo)");
+    Server.default.bind({
+        Ndef(\testmelody, {
+            var trig=Impulse.kr(3.2), seq=Dseq([220,277.18,329.63,392,329.63,277.18,246.94],inf);
+            var f=Demand.kr(trig,0,seq), env=Decay2.kr(trig,0.01,0.35);
+            var tone=SinOsc.ar(f)*env*0.25, pan=ToggleFF.kr(trig).linlin(0,1,-0.6,0.6);
+            Pan2.ar(tone, pan)
+        });
+        Ndef(\testmelody).ar(2);
+    });
+};
+
+enforceExclusiveCurrent = {
+    log.("CURRENT <- \\testmelody; play A, stop B");
+    ~mpb.setSourceCurrent(\testmelody);
+    ~mpb.playCurrent;
+    Server.default.bind({
+        if(Ndef(\chainB).isPlaying) { Ndef(\chainB).stop };
+        if(Ndef(\chainA).isPlaying.not) { Ndef(\chainA).play(numChannels: 2) };
+    });
+};
+
+ensureMetersOk = {
+    if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) {
+        log.("meters retarget");
+        ~gui.enableMeters(false); ~gui.enableMeters(true);
+    };
+};
+
+verifyState = {
+    log.("verify");
+    ~mpb.printChains;
+    AppClock.sched(0.15, {
+        "[PLAY] A=%  B=%"
+        .format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)
+        .postln; nil
+    });
+};
+
+log.("starting bring‑up (minimal)");
+step.(t[\boot],    { doBoot.value });
+step.(t[\sinks],   { ensureSinks.value });
+step.(t[\guiMpb],  { ensureGuiMpb.value });
+step.(t[\source],  { ensureSource.value });
+step.(t[\current], { enforceExclusiveCurrent.value });
+step.(t[\meters],  { ensureMetersOk.value });
+step.(t[\verify],  { verifyState.value });
+
+)
+// OneShot_ResetToCleanBaseline.scd
+// v0.6
+// MD 20250916-1708
+
+//
+// Purpose: Reset to a clean, audible baseline and GUARANTEE exclusivity by silencing NEXT.
+//          Ensures robust sinks (\in.ar(2)), defines \testmelody, uses MPB.reset, then enforces
+//          CURRENT-only by muting NEXT at the sink source; retargets meters and prints final state.
+// Style:   tilde vars; var-first; lowercase names; no server.sync; Server.default.bind for server ops.
+
+(
+var log, ensureSinksRobust, ensureSource, ensureGuiMpb, doMpbReset,
+    setCurrent, enforceExclusiveBySilence, retargetMeters, verify;
+
+log = { arg s; ("[RESET] " ++ s).postln; };
+
+// Robust sinks + AR
+ensureSinksRobust = {
+    Server.default.bind({
+        Ndef(\chainA, { \in.ar(2) });
+        Ndef(\chainB, { \in.ar(2) });
+        Ndef(\chainA).ar(2);
+        Ndef(\chainB).ar(2);
+    });
+};
+
+// Internal source
+ensureSource = {
+    Server.default.bind({
+        Ndef(\testmelody, {
+            var trig, seq, f, env, tone, pan;
+            trig = Impulse.kr(3.2);
+            seq  = Dseq([220,277.18,329.63,392,329.63,277.18,246.94], inf);
+            f    = Demand.kr(trig,0,seq);
+            env  = Decay2.kr(trig,0.01,0.35);
+            tone = SinOsc.ar(f) * env * 0.25;
+            pan  = ToggleFF.kr(trig).linlin(0,1,-0.6,0.6);
+            Pan2.ar(tone, pan)
+        });
+        Ndef(\testmelody).ar(2);
+    });
+};
+
+// GUI + MPB and reset
+ensureGuiMpb = {
+    ~gui = ~gui ?? { MagicDisplayGUI.new };
+    ~mpb = ~mpb ?? { MagicPedalboardNew.new(~gui) };
+};
+doMpbReset = { ~mpb.reset };
+
+// CURRENT <- testmelody; play
+setCurrent = {
+    ~mpb.setSourceCurrent(\testmelody);
+    ~mpb.playCurrent;
+};
+
+// Silencing strategy: mute NEXT sink’s source (hard silence), keep CURRENT robust+playing
+enforceExclusiveBySilence = {
+    var currentSink, nextSink;
+    currentSink = ~mpb.effectiveCurrent[0];
+    nextSink    = ~mpb.effectiveNext[0];
+
+    Server.default.bind({
+        // CURRENT robust + playing
+        Ndef(currentSink, { \in.ar(2) });
+        Ndef(currentSink).ar(2);
+        Ndef(currentSink).fadeTime_(0.05);
+        if(Ndef(currentSink).isPlaying.not) { Ndef(currentSink).play(numChannels: 2) };
+
+        // NEXT silenced at source (even if its monitor claims 'playing', it contributes 0 audio)
+        Ndef(nextSink, { Silent.ar(2) });
+        Ndef(nextSink).ar(2);
+        Ndef(nextSink).fadeTime_(0.01);
+        Ndef(nextSink).stop;
+    });
+    log.("exclusive enforced by silencing NEXT " ++ nextSink.asString);
+};
+
+// meters after AR
+retargetMeters = {
+    if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) {
+        ~gui.enableMeters(false);
+        ~gui.enableMeters(true);
+    };
+};
+
+// final print
+verify = {
+    ~mpb.printChains;
+    AppClock.sched(0.25, {
+        ("[PLAY] A=%  B=%"
+            .format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
+        nil
+    });
+};
+
+log.("start");
+Server.default.boot;
+
+ensureSinksRobust.value;
+ensureGuiMpb.value;
+doMpbReset.value;
+ensureSource.value;
+setCurrent.value;
+enforceExclusiveBySilence.value;
+retargetMeters.value;
+verify.value;
+)
 // prep_demo_audio_gui_current.scd
 // v0.1
 // MD 20250916-1046
@@ -1191,6 +2088,30 @@ ensureSource = {
 ~pedalboard.setSourceCurrent(\testmelody);  // CURRENT, so it's audible immediately
 ~pedalboard.playCurrent;
 ~pedalboard.printChains;
+)
+// quick_start_audible.scd
+// v0.1
+
+(
+// 0) Recompile classes first (Cmd+Shift+L) if you just edited them.
+// 1) GUI + pedalboard
+~gui = ~gui ?? { MagicDisplayGUI.new };
+~mpb = ~mpb ?? { MagicPedalboardNew.new(~gui) };
+
+// 2) Make CURRENT use our internal melody, play it
+~mpb.setSourceCurrent(\testmelody);
+~mpb.playCurrent;
+
+// 3) Add delay to NEXT and switch (should hear the echo)
+~mpb.add(\delay);
+~mpb.switchChain(0.12);
+
+// 4) If you still hear nothing, run the recover helper:
+~recoverIfSilent.();
+
+// 5) Inspect
+~mpb.printChains;
+"[[PLAY]] A=%  B=%".format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying).postln;
 )
 // quickprep.scd
 // v0.1
@@ -1770,6 +2691,81 @@ jsonPath.postln;
 };
 
 ) // end block
+// switchDelayCheck.scd
+// v0.1
+// MD 20250916
+
+(
+// Goal: add \delay to NEXT, switch with a crossfade, and confirm audio continues on CURRENT.
+
+// --- Preconditions: GUI + MPB exist; audibleSanity.scd already run today. ---
+
+var log, cleanupDirectPlays, prepStatus, addDelayToNext, doSwitch, afterSwitchCheck, recoverIfSilent;
+
+log = { arg m; ("[switchDelay] " ++ m).postln };
+
+cleanupDirectPlays = {
+    // ensure no direct-to-out play is active for the generator
+    if(Ndef(\testmelody).isPlaying) { Ndef(\testmelody).stop; log.("stopped direct \\testmelody") };
+};
+
+prepStatus = {
+    ~mpb.printChains;
+    ("[before] A=%  B=%"
+        .format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
+};
+
+addDelayToNext = {
+    ~mpb.clearChain;            // keep NEXT minimal before adding
+    ~mpb.add(\delay);           // add to NEXT
+    ~mpb.printChains;
+};
+
+doSwitch = {
+    ~mpb.switchChain(0.12);     // short crossfade; CURRENT <-> NEXT
+};
+
+afterSwitchCheck = {
+    AppClock.sched(0.35, {
+        ~mpb.printChains;
+        ("[after]  A=%  B=%"
+            .format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
+        nil
+    });
+};
+
+// If for any reason we went silent, rebuild connections & enforce CURRENT-only play.
+// (Equivalent to your enforceExclusiveCurrentNow utilities)
+recoverIfSilent = {
+    AppClock.sched(0.60, {
+        var curEff, curSink;
+        curEff = ~mpb.effectiveCurrent;
+        curSink = curEff[0];
+        Server.default.bind({
+            ~mpb.rebuildUnbound(~mpb.currentChain);
+            ~mpb.rebuildUnbound(~mpb.nextChain);
+            // enforce exclusive current
+            if(curSink == \chainA) {
+                if(Ndef(\chainB).isPlaying) { Ndef(\chainB).stop };
+                if(Ndef(\chainA).isPlaying.not) { Ndef(\chainA).play(numChannels: 2) };
+            }{
+                if(Ndef(\chainA).isPlaying) { Ndef(\chainA).stop };
+                if(Ndef(\chainB).isPlaying.not) { Ndef(\chainB).play(numChannels: 2) };
+            };
+        });
+        log.("reconnect enforced, currentEff=" ++ curEff);
+        nil
+    });
+};
+
+// --- run steps ---
+cleanupDirectPlays.value;
+prepStatus.value;
+addDelayToNext.value;
+doSwitch.value;
+afterSwitchCheck.value;
+recoverIfSilent.value;
+)
 // test_editor_commandtree_add_demo_verbs_part_a.scd
 // v0.1
 // MD 20250916-0919

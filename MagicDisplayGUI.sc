@@ -1,4 +1,4 @@
-/* MagicDisplayGUI.sc v0.2.5
+/* MagicDisplayGUI.sc v0.2.6
  CURRENT column highlighted in green; top-down list (src → procs → sink);
  expectation text + visual countdown; operations list with 3s pre-roll;
  embedded meters (A/B). UI-ready queue prevents touching nil views.
@@ -35,7 +35,7 @@ MagicDisplayGUI : MagicDisplay {
 
 	*initClass {
 		var text;
-		versionGUI = "v0.2.5";
+		versionGUI = "v0.2.6";
 		text = "MagicDisplayGUI " ++ versionGUI;
 		text.postln;
 	}
@@ -393,14 +393,107 @@ MagicDisplayGUI : MagicDisplay {
 		});
 	}
 
+	/////////////////
 	// meters
-	enableMeters { arg flag = true;
-		var shouldEnable;
-		// wait for sinks to be made audio-rate
+	// --- canonical enableMeters: waits until sinks are audio-rate, then attaches meters ---
+// MagicDisplayGUI.sc
+// canonical enableMeters: resend SynthDefs every time; wait until sinks are audio-rate
+enableMeters { arg flag = true;
+    var shouldEnable, aOK, bOK, busA, busB;
+
+    // When enabling, wait until sinks are audio-rate (no control-rate bus warnings)
+    if(flag) {
+        busA = Ndef(\chainA).bus;
+        busB = Ndef(\chainB).bus;
+        aOK = busA.notNil and: { busA.rate == \audio };
+        bOK = busB.notNil and: { busB.rate == \audio };
+        if(aOK.not or: { bOK.not }) {
+            AppClock.sched(0.20, { this.enableMeters(true); nil });
+            ^this;
+        };
+        // Also guard against server being off
+        if(Server.default.serverRunning.not) {
+            AppClock.sched(0.20, { this.enableMeters(true); nil });
+            ^this;
+        };
+    };
+
+    shouldEnable = flag ? true;
+    enableMetersFlag = shouldEnable;
+
+    if(shouldEnable) {
+        Server.default.bind({
+            var busA_local, busB_local;
+
+            // Always (re)send SynthDefs so they exist on the server now.
+            SynthDef(\busMeterA, { arg inBus, rate = 15;
+                var sig = In.ar(inBus, 2);
+                var amp = Amplitude.ar(sig).clip(0, 1);
+                SendReply.kr(Impulse.kr(rate), '/ampA', A2K.kr(amp));
+            }).add;
+            SynthDef(\busMeterB, { arg inBus, rate = 15;
+                var sig = In.ar(inBus, 2);
+                var amp = Amplitude.ar(sig).clip(0, 1);
+                SendReply.kr(Impulse.kr(rate), '/ampB', A2K.kr(amp));
+            }).add;
+
+            if(meterSynthA.notNil) { meterSynthA.free };
+            if(meterSynthB.notNil) { meterSynthB.free };
+
+            busA_local = Ndef(\chainA).bus;
+            busB_local = Ndef(\chainB).bus;
+
+            meterSynthA = Synth(\busMeterA, [\inBus, busA_local.index, \rate, 24],
+                target: Server.default.defaultGroup, addAction: \addToTail);
+            meterSynthB = Synth(\busMeterB, [\inBus, busB_local.index, \rate, 24],
+                target: Server.default.defaultGroup, addAction: \addToTail);
+        });
+
+        if(oscA.notNil) { oscA.free };
+        if(oscB.notNil) { oscB.free };
+        oscA = OSCdef(\ampA, { arg msg;
+            var leftAmp, rightAmp, levelAvg;
+            leftAmp = msg[3]; rightAmp = msg[4];
+            levelAvg = ((leftAmp + rightAmp) * 0.5).clip(0, 1);
+            AppClock.sched(0, { if(meterViewA.notNil) { meterViewA.value_(levelAvg) }; nil });
+        }, '/ampA');
+        oscB = OSCdef(\ampB, { arg msg;
+            var leftAmp, rightAmp, levelAvg;
+            leftAmp = msg[3]; rightAmp = msg[4];
+            levelAvg = ((leftAmp + rightAmp) * 0.5).clip(0, 1);
+            AppClock.sched(0, { if(meterViewB.notNil) { meterViewB.value_(levelAvg) }; nil });
+        }, '/ampB');
+        ^this;
+
+    } {
+        Server.default.bind({
+            if(meterSynthA.notNil) { meterSynthA.free; meterSynthA = nil; };
+            if(meterSynthB.notNil) { meterSynthB.free; meterSynthB = nil; };
+        });
+        if(oscA.notNil) { oscA.free; oscA = nil; };
+        if(oscB.notNil) { oscB.free; oscB = nil; };
+        AppClock.sched(0, {
+            if(meterViewA.notNil) { meterViewA.value_(0.0) };
+            if(meterViewB.notNil) { meterViewB.value_(0.0) };
+            nil
+        });
+        ^this;
+    };
+}
+
+/*	enableMeters { arg flag = true;
+		var shouldEnable, aOK, bOK, busA, busB;
+
+		// Only guard when enabling
 		if(flag) {
-			var aOK = (Ndef(\chainA).bus.notNil) and: { Ndef(\chainA).bus.rate == \audio };
-			var bOK = (Ndef(\chainB).bus.notNil) and: { Ndef(\chainB).bus.rate == \audio };
+			// read buses once
+			busA = Ndef(\chainA).bus;
+			busB = Ndef(\chainB).bus;
+			// both must exist and be audio-rate
+			aOK = busA.notNil and: { busA.rate == \audio };
+			bOK = busB.notNil and: { busB.rate == \audio };
 			if(aOK.not or: { bOK.not }) {
+				// retry shortly on AppClock; do not mutate the audio tree here
 				AppClock.sched(0.20, { this.enableMeters(true); nil });
 				^this;
 			};
@@ -410,9 +503,9 @@ MagicDisplayGUI : MagicDisplay {
 		enableMetersFlag = shouldEnable;
 
 		if(shouldEnable) {
-			// --- existing enable path (unchanged) ---
+			// --- enable path (unchanged except for the pre-check above) ---
 			Server.default.bind({
-				var hasA, hasB, busA, busB;
+				var hasA, hasB, busA_local, busB_local;
 				hasA = SynthDescLib.global.at(\busMeterA).notNil;
 				hasB = SynthDescLib.global.at(\busMeterB).notNil;
 				if(hasA.not) {
@@ -433,11 +526,15 @@ MagicDisplayGUI : MagicDisplay {
 				};
 				if(meterSynthA.notNil) { meterSynthA.free };
 				if(meterSynthB.notNil) { meterSynthB.free };
-				busA = Ndef(\chainA).bus;
-				busB = Ndef(\chainB).bus;
-				meterSynthA = Synth(\busMeterA, [\inBus, busA.index, \rate, 24], target: Server.default.defaultGroup, addAction: \addToTail);
-				meterSynthB = Synth(\busMeterB, [\inBus, busB.index, \rate, 24], target: Server.default.defaultGroup, addAction: \addToTail);
+				// read buses post-guard
+				busA_local = Ndef(\chainA).bus;
+				busB_local = Ndef(\chainB).bus;
+				meterSynthA = Synth(\busMeterA, [\inBus, busA_local.index, \rate, 24],
+					target: Server.default.defaultGroup, addAction: \addToTail);
+				meterSynthB = Synth(\busMeterB, [\inBus, busB_local.index, \rate, 24],
+					target: Server.default.defaultGroup, addAction: \addToTail);
 			});
+
 			if(oscA.notNil) { oscA.free };
 			if(oscB.notNil) { oscB.free };
 			oscA = OSCdef(\ampA, { arg msg;
@@ -453,8 +550,9 @@ MagicDisplayGUI : MagicDisplay {
 				AppClock.sched(0, { if(meterViewB.notNil) { meterViewB.value_(levelAvg) }; nil });
 			}, '/ampB');
 			^this;
-		}{
-			// --- new disable path ---
+
+		} {
+			// --- disable path (unchanged) ---
 			Server.default.bind({
 				if(meterSynthA.notNil) { meterSynthA.free; meterSynthA = nil; };
 				if(meterSynthB.notNil) { meterSynthB.free; meterSynthB = nil; };
@@ -469,8 +567,9 @@ MagicDisplayGUI : MagicDisplay {
 			^this;
 		};
 	}
+*/
 
-
+	///////////////
 
 	// display hooks
 	showInit { arg pedalboard, versionString, current, next;

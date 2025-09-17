@@ -1,0 +1,59 @@
+SESSION_SUMMARY_AND_TODO.txt
+
+SUMMARY (END OF DAY)
+- Current working point:
+  - OneShot_BringUp_MagicPedalboardNew_GUI_Meters.scd produces sound and meters; acceptance scenario works (audio + window + meters).
+  - Reset-to-baseline sometimes leaves both sinks marked isPlaying=true and can result in silence with meters moving due to NodeProxy monitor tails / race conditions.
+  - Strong “stop/pause/clear” attempts can still leave isPlaying=true or throw node-not-found if the monitor node has already been torn down.
+  - Silencing NEXT sink at the source to Silent.ar(2) is deterministic and removes audio even if isPlaying remains true. Switching then requires reapplying exclusivity to the new NEXT.
+
+- We did not reach 17:00 milestone today. Target is to lock exclusivity into class behavior early tomorrow.
+
+DECISIONS TO CARRY FORWARD
+- Tests use generated audio only; no SoundIn unless Martin explicitly requests it.
+- JITLib operator is <<> only.
+- Sinks and FX that consume embedded input must read \in.ar(defaultNumChannels).
+- GUI: AppClock-only; one window; reuse by name beginsWith("MagicDisplayGUI"); no “v6” labels anywhere.
+- All server operations inside Server.default.bind. No server.sync.
+
+KNOWN GOOD FILES/SCENARIOS
+- OneShot_BringUp_MagicPedalboardNew_GUI_Meters.scd (produces sound, meters OK).
+- OneShot_Acceptance_SwitchDelay.scd (acceptance path passes).
+
+KNOWN ISSUES
+- After some resets/switches, NEXT sink may still show isPlaying=true; sometimes silence occurs despite meters moving (monitor tail/race).
+- Prior attempts to enforce exclusivity via stop/pause on NEXT can race with node teardown.
+
+PLAN FOR TOMORROW (EARLY START)
+- Ask Martin to paste these code segments so we patch with zero assumptions:
+  - MagicPedalboardNew.sc: reset, playCurrent, switchChain, rebuildUnbound (full methods).
+  - MagicDisplayGUI.sc: enableMeters (active version).
+- Implement class-level exclusivity helper in MagicPedalboardNew:
+  - Preferred Option A (deterministic): silence NEXT sink source to Silent.ar(defaultNumChannels); ensure CURRENT sink source is \in.ar and play it; set short fadeTimes for switching. Call this at end of reset and end of switchChain after swapping current/next.
+  - Ensure rebuildUnbound still uses Ndef(left) <<> Ndef(right) only and keeps CURRENT play / NEXT stop semantics.
+- Verify meters: enableMeters guards buses are AR and resends SynthDefs before creating meter synths; free OSCdefs and Synths cleanly on disable.
+- Re-run:
+  - Bring-up → Acceptance (add → switch → bypass on/off → switch), confirm:
+    - Audio audible at each step.
+    - CURRENT sink audible; NEXT sink silent unless switching.
+    - GUI matches CURRENT/NEXT after each operation.
+    - No “SynthDef not found”, no control-rate bus warnings, no extra windows.
+
+EXECUTION ORDER NEXT SESSION
+- Bring up server and GUI using the known-good bring-up script.
+- Patch MagicPedalboardNew as agreed (after Martin pastes the methods).
+- Patch MagicDisplayGUI enableMeters if needed (after Martin pastes it).
+- Re-run acceptance; if any silence occurs, capture Post window and apply minimal targeted adjustments.
+
+CODING/PATCHING RULES (ALWAYS)
+- Headers must precede any code with Martin’s exact format (3 lines: file name, version, MD timestamp; blank line; Purpose/Style block; then code).
+- tilde vars; var-first; lowercase names; no single-letter locals.
+- No server.sync. All server operations in Server.default.bind.
+- GUI ops on AppClock only; no watchers/pollers; one window; reuse by title beginsWith("MagicDisplayGUI"); do not introduce “v6” anywhere.
+- Use <<> as the only JITLib embed operator.
+- Ask for files/snippets if anything is unknown; do not assume implementation details.
+
+NOTES TO SELF
+- When writing tests or fixes, always include the header exactly as specified.
+- Keep demos free of audio interface inputs; use internal sources (e.g., \testmelody) unless Martin requests otherwise.
+- If a test leaves both sinks “playing”, favor silencing NEXT at source for determinism, then proceed with the normal workflow.

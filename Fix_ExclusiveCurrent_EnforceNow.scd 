@@ -1,0 +1,35 @@
+// Fix_ExclusiveCurrent_EnforceNow.scd
+// v0.1
+// MD 20250916-1637
+
+(
+
+
+var log, stopBothThenPlayA, verify;
+
+log = { arg s; ("[FIX] " ++ s).postln; };
+
+// 1) Stop both A and B hard, then play A only (belt-and-braces)
+stopBothThenPlayA = {
+    Server.default.bind({
+        Ndef(\chainA).stop;
+        Ndef(\chainB).stop;
+        Ndef(\chainA).play(numChannels: 2);
+    });
+    log.("stopped B & relaunched A");
+};
+
+// 2) Verify a moment later (no server.sync)
+verify = {
+    AppClock.sched(0.25, {
+        var a, b;
+        a = Ndef(\chainA).isPlaying;
+        b = Ndef(\chainB).isPlaying;
+        ("[PLAY] A=%  B=%".format(a, b)).postln;
+        nil
+    });
+};
+
+stopBothThenPlayA.value;
+verify.value;
+)

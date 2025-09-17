@@ -49,18 +49,20 @@ MagicPedalboardNew : Object {
 		defaultNumChannels = 2;
 		defaultSource = \ts0;
 
-		// improved
-		sinkFunc = { arg inSignal; inSignal };
+		// less good than the version below
+		// sinkFunc = { arg inSignal; inSignal };
 
-/* old version:
+
 		sinkFunc = {
 			var inputSignal;
 			inputSignal = \in.ar(defaultNumChannels);
 			inputSignal
-		};*/
+		};
 
 		Ndef(\chainA, sinkFunc);
 		Ndef(\chainB, sinkFunc);
+
+		// Guarantee sink buses are audio-rate early (prevents kr-meter races)
 		Server.default.bind({
 			Ndef(\chainA).ar(defaultNumChannels);  // typically 2
 			Ndef(\chainB).ar(defaultNumChannels);
