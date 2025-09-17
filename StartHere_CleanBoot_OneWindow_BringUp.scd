@@ -1,74 +1,61 @@
 // StartHere_CleanBoot_OneWindow_BringUp.scd
-// v0.4
-// MD 20250917-1338
+// v0.5
+// MD 20250917-1346
 //
-// Purpose: Deterministic clean boot from a fresh (or messy) state:
-//          - Close any existing MagicDisplayGUI windows (singleton)
-//          - Quit server if running, then boot + wait for boot
-//          - Init class tree, clear default group
-//          - Build sinks (\\in.ar(2)) + sources (\\ts0 silent, \\testmelody)
-//          - Create GUI + MPB (meters off), set CURRENT=\\testmelody
-//          - Enforce Option A (NEXT silent), enable meters, verify A XOR B
-// Style: tilde vars, var-first, lowercase names, no server.sync,
-//        all server ops inside Server.default.bind; GUI via AppClock only.
+// Purpose: From a fresh interpreter, produce one MagicDisplayGUI window,
+//          audible CURRENT (\testmelody), NEXT silent (Option A), meters on,
+//          and verify A=true B=false.
+// Style: tilde vars, var-first, lowercase names; no server.sync;
+//        server ops inside Server.default.bind; GUI via AppClock.
 
 (
-var log, s, closeGuiWindows, waitForServerDown, waitForBootFlagged,
-    bootClean, buildAudio, makeGuiAndMpb, baseline, metersOn, verify;
+var log, s, schedule, closeGuiWindows, bootIfNeededThen, buildAudio, makeGuiAndMpb, baseline, metersOn, verify;
 
-log = { arg t; ("[START] " ++ t).postln };
-s = Server.default;
+log = { arg msg; ("[START] " ++ msg).postln };
+s   = Server.default;
+schedule = { arg dt=0.0, func; AppClock.sched(dt.max(0), { func.value; nil }) };
 
-// Close any MagicDisplayGUI windows (singleton policy)
+// 1) Close any MagicDisplayGUI windows (singleton)
 closeGuiWindows = {
-    AppClock.sched(0.0, {
+    schedule.(0.0, {
         Window.allWindows
             .select({ arg w; (w.name ? "").asString.beginsWith("MagicDisplayGUI") })
             .do(_.close);
-        nil
+        log.("closed any existing MagicDisplayGUI windows");
     });
 };
 
-// Poll until server is fully down
-waitForServerDown = {
-    Routine({
-        while({ s.serverRunning }, { 0.05.wait });
-    })
-};
-
-// Boot and set a flag from s.waitForBoot
-waitForBootFlagged = {
-    var booted = false;
-    s.waitForBoot({
-        s.initTree;       // safe initialization
-        s.defaultGroup.freeAll;
-        booted = true;
-        log.("server booted + tree inited + default group cleared");
-    });
-    Routine({
-        while({ booted.not }, { 0.05.wait });
-    })
-};
-
-// Clean boot sequence (quit if running, then boot and wait)
-bootClean = {
-    Routine({
-        if(s.serverRunning) {
-            s.quit;
-            waitForServerDown.value.play(SystemClock).yield; // block routine until down
-        };
+// 2) After server is booted, do the rest
+bootIfNeededThen = { arg afterBootFunc;
+    if(s.serverRunning) {
+        // Quit first to avoid stale state; boot shortly after
+        log.("server running → quitting");
+        s.quit;
+        schedule.(0.6, { // small delay to let quit complete
+            log.("booting server…");
+            s.boot;
+        });
+    }{
+        log.("booting server…");
         s.boot;
-        waitForBootFlagged.value.play(SystemClock).yield;    // block routine until booted
-    })
+    };
+    // Everything below happens ONLY AFTER the boot completes:
+    s.waitForBoot({
+        log.("server booted");
+        s.initTree; s.defaultGroup.freeAll;
+        log.("tree inited + default group cleared");
+        afterBootFunc.value; // continue
+    });
 };
 
-// Build sinks and sources (server ops)
+// 3) Build sinks and sources (server operations)
 buildAudio = {
     Server.default.bind({
         // Sinks: robust stereo consumers
         Ndef(\chainA, { \in.ar(2) }); Ndef(\chainA).ar(2);
         Ndef(\chainB, { \in.ar(2) }); Ndef(\chainB).ar(2);
-        // Sources
+
+        // Sources: NEXT-safe silent + generated test melody
         Ndef(\ts0, { Silent.ar(2) }); Ndef(\ts0).ar(2);
         Ndef(\testmelody, {
             var trig = Impulse.kr(3.2);
@@ -80,68 +67,55 @@ buildAudio = {
             Pan2.ar(tone, pan)
         }); Ndef(\testmelody).ar(2);
     });
-    log.("sinks + sources ready");
+    log.("sinks + sources defined");
 };
 
-// GUI + MPB (meters off first)
+// 4) Create GUI + MPB (meters OFF initially)
 makeGuiAndMpb = {
-    AppClock.sched(0.0, {
+    schedule.(0.0, {
         ~gui = MagicDisplayGUI.new;
         ~mpb = MagicPedalboardNew.new(~gui);
         if(~gui.respondsTo(\enableMeters)) { ~gui.enableMeters(false) };
-        // Alias for adapter scripts that expect ~pedalboard
+        // Alias for adapter scripts
         if(~pedalboard.isNil and: { ~mpb.notNil }) { ~pedalboard = ~mpb };
         log.("GUI + MPB created (meters off)");
-        nil
     });
 };
 
-// Set baseline: CURRENT <- \testmelody; play + Option A
+// 5) Baseline: CURRENT <- \testmelody; play; enforce Option A (NEXT silent)
 baseline = {
-    ~mpb.setSourceCurrent(\testmelody);
-    ~mpb.playCurrent;
-    ~mpb.enforceExclusiveCurrentOptionA(0.1);  // NEXT silent at source
-    log.("baseline set (CURRENT=\\testmelody, Option A)");
+    schedule.(0.10, {
+        ~mpb.setSourceCurrent(\testmelody);
+        ~mpb.playCurrent;
+        ~mpb.enforceExclusiveCurrentOptionA(0.1);  // NEXT silenced at source
+        log.("baseline set: CURRENT=\\testmelody (Option A)");
+    });
 };
 
-// Meters on (after everything stable)
+// 6) Meters ON after everything is stable
 metersOn = {
-    AppClock.sched(0.05, {
+    schedule.(0.20, {
         if(~gui.respondsTo(\enableMeters)) { ~gui.enableMeters(true) };
         log.("meters enabled");
-        nil
     });
 };
 
-// Verify A/B flags
+// 7) Verify final state
 verify = {
-    ~mpb.printChains;
-    AppClock.sched(0.20, {
-        var a = Ndef(\chainA).isPlaying, b = Ndef(\chainB).isPlaying;
-        ("[PLAY] A=% B=%".format(a, b)).postln;
-        nil
+    schedule.(0.30, {
+        ~mpb.printChains;
+        ("[PLAY] A=% B=%"
+            .format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
     });
 };
 
-// --- Run the whole sequence deterministically inside one Routine ---
-Routine({
-    // 1) GUI singleton
-    closeGuiWindows.value; 0.10.wait;
-
-    // 2) Clean boot (quit if needed, then boot + wait)
-    bootClean.value.play(SystemClock).yield;
-
-    // 3) Build audio graph on server
+// --- Execute clean sequence ---
+closeGuiWindows.value;
+bootIfNeededThen.value({
     buildAudio.value;
-    0.05.wait;
-
-    // 4) GUI + MPB
     makeGuiAndMpb.value;
-    0.15.wait;
-
-    // 5) Baseline + meters + verify
     baseline.value;
     metersOn.value;
     verify.value;
-}).play(SystemClock);
+});
 )
