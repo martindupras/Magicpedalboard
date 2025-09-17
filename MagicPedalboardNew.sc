@@ -255,6 +255,9 @@ MagicPedalboardNew : Object {
 			this.rebuildUnbound(nextChain);
 		});
 
+		// enforce exclusivity post-swap (CURRENT uses actualFadeTime, NEXT silenced)
+this.enforceExclusiveCurrentOptionA(actualFadeTime);
+
 		if(display.notNil) {
 			display.showSwitch(oldSinkKey, currentChain[0], currentChain, nextChain);
 		};
@@ -424,6 +427,9 @@ MagicPedalboardNew : Object {
 			this.rebuildUnbound(currentChain);
 		});
 
+// enforce exclusive invariant (Option A): CURRENT audible; NEXT silent
+this.enforceExclusiveCurrentOptionA(0.1);
+
 		if(display.notNil) { display.showReset(currentChain, nextChain) };
 	}
 
@@ -499,6 +505,34 @@ MagicPedalboardNew : Object {
 		^serverIsRunning
 	}
 
+
+	enforceExclusiveCurrentOptionA { arg fadeCurrent = 0.1;
+		var currentSink, nextSink, chans, fadeCur;
+		currentSink = currentChain[0];
+		nextSink = nextChain[0];
+		chans = defaultNumChannels;
+		fadeCur = fadeCurrent.clip(0.05, 0.2);
+
+		Server.default.bind({
+			// CURRENT: robust sink that consumes embedded input; ensure playing
+			Ndef(currentSink, { \in.ar(chans) });
+			Ndef(currentSink).ar(chans);
+			Ndef(currentSink).fadeTime_(fadeCur);
+			if (Ndef(currentSink).isPlaying.not) {
+				Ndef(currentSink).play(numChannels: chans)
+			};
+
+			// NEXT: hard silence at the sink source; stop its monitor quickly
+			Ndef(nextSink, { Silent.ar(chans) });
+			Ndef(nextSink).ar(chans);
+			Ndef(nextSink).fadeTime_(0.01);
+			Ndef(nextSink).stop;
+		});
+
+		^this
+	}
+
+
 	effectiveListForInternal { arg listRef;
 		var dict, resultList, lastIndex, isProcessor, isBypassed;
 		dict = this.bypassDictForListInternal(listRef);
@@ -533,6 +567,7 @@ MagicPedalboardNew : Object {
 			display.showRebuild(whichChain, listRef, this.effectiveListForInternal(listRef));
 		};
 	}
+
 
 	// Internal rebuild that assumes we are already inside a server bind (no resets)
 	rebuildUnbound { arg listRef;
