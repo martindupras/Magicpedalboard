@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Martin Dupras (via patch) <martin@example.com>
+Date: 2025-09-17 10:10:00 +0100
+Subject: [PATCH] MagicPedalboardNew: enforce class-level exclusivity (Option A)
+ using sink-source silence on NEXT; wire into reset and switchChain.
+
+--- a/MagicPedalboardNew.sc
++++ b/MagicPedalboardNew.sc
+@@ -1,3 +1,4 @@
++// Patch: class-level exclusivity helper (Option A) + calls in reset/switchChain
+ /* MagicPedalboardNew.sc v0.4.3
+  A/B pedalboard chain manager built on Ndefs.
+  - Chains are Arrays of Symbols ordered [sink, …, source].
+@@ -348,6 +349,35 @@
+         serverIsRunning = Server.default.serverRunning;
+         ^serverIsRunning
+     }
++
++    // MagicPedalboardNew.sc
++    // v0.4.3-p1
++    // MD 20250917-1010
++    //
++    // Purpose: Class-level exclusivity helper (Option A) — silence NEXT at the sink source
++    //          and keep CURRENT robust+playing. Deterministic against monitor tails/races.
++    // Style:   tilde vars, var-first, lowercase names, no server.sync,
++    //          server ops inside Server.default.bind.
++    enforceExclusiveCurrentOptionA { arg fadeCurrent = 0.1;
++        var currentSink, nextSink, chans, fadeCur;
++        currentSink = currentChain[0];
++        nextSink = nextChain[0];
++        chans = defaultNumChannels;
++        fadeCur = fadeCurrent.clip(0.05, 0.2);
++
++        Server.default.bind({
++            // CURRENT: robust sink that consumes embedded input; ensure playing
++            Ndef(currentSink, { \in.ar(chans) });
++            Ndef(currentSink).ar(chans);
++            Ndef(currentSink).fadeTime_(fadeCur);
++            if (Ndef(currentSink).isPlaying.not) { Ndef(currentSink).play(numChannels: chans) };
++
++            // NEXT: hard silence at the sink source and stop its monitor
++            Ndef(nextSink, { Silent.ar(chans) });
++            Ndef(nextSink).ar(chans);
++            Ndef(nextSink).fadeTime_(0.01);
++            Ndef(nextSink).stop;
++        });
++        ^this
++    }
+ 
+     effectiveListForInternal { arg listRef;
+         var dict, resultList, lastIndex, isProcessor, isBypassed;
+@@ -417,6 +447,9 @@
+             this.rebuildUnbound(nextChain);
+             this.rebuildUnbound(currentChain);
+         });
++
++        // enforce exclusive invariant (Option A): CURRENT audible; NEXT silent
++        this.enforceExclusiveCurrentOptionA(0.1);
+ 
+         if(display.notNil) { display.showReset(currentChain, nextChain) };
+     }
+@@ -364,6 +397,7 @@
+     switchChain { arg fadeTime = 0.1;
+         var temporaryList, oldSinkKey, newSinkKey, actualFadeTime, canRun;
+         canRun = this.ensureServerTree;
+-        if(canRun.not) { ^this };
++        if(canRun.not) { ^this };
+         actualFadeTime = fadeTime.clip(0.08, 0.2);
+         oldSinkKey = currentChain[0];
+         newSinkKey = nextChain[0];
+@@ -382,9 +416,12 @@
+             // ensure both chains are in correct post-swap state
+             this.rebuildUnbound(currentChain);
+             this.rebuildUnbound(nextChain);
+         });
++
++        // enforce exclusive invariant (Option A) post-swap (uses actualFadeTime for CURRENT)
++        this.enforceExclusiveCurrentOptionA(actualFadeTime);
+ 
+         if(display.notNil) {
+             display.showSwitch(oldSinkKey, currentChain[0], currentChain, nextChain);
+         };
+     }
+
