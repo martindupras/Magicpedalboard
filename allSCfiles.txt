@@ -1,0 +1,1575 @@
+/* MagicDisplay.sc  v0.1.2
+   Console display adaptor for MagicPedalboardNew.
+   Prints structured messages now; later you can subclass with a real GUI.
+   // MD 20250912-1345
+*/
+
+MagicDisplay : Object {
+
+    classvar < version;
+
+    var < logLevel;  // 0 = silent, 1 = normal, 2 = verbose
+
+    *initClass {
+        version = "v0.1.2";
+        ("MagicDisplay " ++ version).postln;
+    }
+
+    *new { |level = 1|
+        ^super.new.init(level)
+    }
+
+    init { |level|
+        var initialLevel;
+        initialLevel = level ? 1;
+        logLevel = initialLevel;
+        ^this
+    }
+
+    help {
+        var text;
+        text = "MagicDisplay " ++ version
+        ++ "\nMethods:\n"
+        ++ "  showInit(pedalboard, versionString, current, next)\n"
+        ++ "  showRebuild(which, fullChain, effective)\n"
+        ++ "  showPlay(sink), showStop(sink), showSwitch(oldSink, newSink, current, next)\n"
+        ++ "  showMutation(action, args, nextChain)\n"
+        ++ "  showBypass(which, key, state, chain, bypassKeys)\n"
+        ++ "  showReset(current, next), showChains(current, next, bypassA, bypassB)\n"
+        ++ "  showChainsDetailed(current, next, bypassA, bypassB, effCurrent, effNext)\n"
+        ++ "  showError(message)\n";
+        text.postln;
+    }
+
+    showInit { |pedalboard, versionString, current, next|
+        if(logLevel > 0) { ("[MPB:init] " ++ versionString ++ "  current=" ++ current ++ "  next=" ++ next).postln };
+    }
+
+    showRebuild { |which, fullChain, effective|
+        if(logLevel > 0) { ("[MPB:rebuild:" ++ which ++ "] full=" ++ fullChain ++ "  effective=" ++ effective).postln };
+    }
+
+    showPlay { |sinkKey|
+        if(logLevel > 0) { ("[MPB:play] sink=" ++ sinkKey).postln };
+    }
+
+    showStop { |sinkKey|
+        if(logLevel > 0) { ("[MPB:stop] sink=" ++ sinkKey).postln };
+    }
+
+    showSwitch { |oldSink, newSink, current, next|
+        if(logLevel > 0) {
+            ("[MPB:switch] " ++ oldSink ++ " → " ++ newSink
+                ++ "  current=" ++ current ++ "  next=" ++ next).postln;
+        };
+    }
+
+    showMutation { |action, args, nextChain|
+        if(logLevel > 0) { ("[MPB:mutate] " ++ action ++ " " ++ args ++ "  next=" ++ nextChain).postln };
+    }
+
+    showBypass { |which, key, state, chain, bypassKeys|
+        if(logLevel > 0) {
+            ("[MPB:bypass:" ++ which ++ "] " ++ key ++ " -> " ++ state
+                ++ "  chain=" ++ chain ++ "  activeBypass=" ++ bypassKeys).postln;
+        };
+    }
+
+    showReset { |current, next|
+        if(logLevel > 0) { ("[MPB:reset] current=" ++ current ++ "  next=" ++ next).postln };
+    }
+
+    showChains { |current, next, bypassAKeys, bypassBKeys|
+        if(logLevel > 0) {
+            "MagicPedalboardNew.printChains:".postln;
+            ("A: " ++ current ++ "   bypassA: " ++ bypassAKeys).postln;
+            ("B: " ++ next    ++ "   bypassB: " ++ bypassBKeys).postln;
+        };
+    }
+
+    showChainsDetailed { |current, next, bypassAKeys, bypassBKeys, effCurrent, effNext|
+        var header, formatOne;
+
+        if(logLevel <= 0) { ^this };
+
+        header = { |titleString| ("==== " ++ titleString ++ " ====").postln };
+
+        formatOne = { |titleString, listRef, bypassKeys, effective|
+            var sinkKey, sourceKey, lastIndex, indexCounter, lineText;
+
+            lastIndex = listRef.size - 1;
+            sinkKey = listRef[0];
+            sourceKey = listRef[lastIndex];
+
+            header.(titleString);
+            ("sink : " ++ sinkKey).postln;
+
+            indexCounter = 1;
+            if(listRef.size > 2) {
+                "procs:".postln;
+                listRef.copyRange(1, lastIndex - 1).do { |procKey|
+                    var isBypassed, mark;
+                    isBypassed = bypassKeys.includes(procKey);
+                    mark = if(isBypassed) { "BYP" } { "ON " };
+                    lineText = ("  [" ++ indexCounter ++ "] " ++ procKey ++ "  (" ++ mark ++ ")");
+                    lineText.postln;
+                    indexCounter = indexCounter + 1;
+                };
+            }{
+                "procs: (none)".postln;
+            };
+
+            ("src  : " ++ sourceKey).postln;
+            ("eff  : " ++ effective.join("  ->  ")).postln;
+            "".postln;
+        };
+
+        formatOne.("CURRENT", current, bypassAKeys, effCurrent);
+        formatOne.("NEXT",    next,    bypassBKeys, effNext);
+    }
+
+    showError { |message|
+        ("[MPB:error] " ++ message).warn;
+    }
+}
+/* MagicDisplayGUI.sc v0.2.6
+ CURRENT column highlighted in green; top-down list (src → procs → sink);
+ expectation text + visual countdown; operations list with 3s pre-roll;
+ embedded meters (A/B). UI-ready queue prevents touching nil views.
+ No server.sync; server ops inside Server.default.bind.
+ // MD 20250912-1738
+*/
+MagicDisplayGUI : MagicDisplay {
+	classvar <versionGUI;
+
+	var <window;
+
+	// layout elements
+	var leftPanel, rightPanel;
+	var leftHeader, rightHeader;
+	var leftListView, rightListView;
+	var leftEffective, rightEffective;
+
+	// expectation + countdown
+	var expectationText;
+	var countdownLabel, countdownBarView, countdownTask, countdownSecondsDefault;
+
+	// operations panel
+	var opsListView, opsNextButton, opsStatusText;
+	var opsItems, opsIndexNext, opsCallback, opsCountdownSeconds;
+
+	// meters
+	var meterViewA, meterViewB;
+	var meterSynthA, meterSynthB, oscA, oscB;
+	var enableMetersFlag;
+
+	// ui-ready machinery
+	var uiReadyFlag;
+	var uiPendingActions;
+
+	*initClass {
+		var text;
+		versionGUI = "v0.2.6";
+		text = "MagicDisplayGUI " ++ versionGUI;
+		text.postln;
+	}
+
+	*new { arg level = 1;
+		var instance;
+		instance = super.new(level);
+		^instance.initGui;
+	}
+
+	initGui {
+		var windowRect, panelWidth, listHeight, headerHeight, footerHeight, pad;
+		var opsWidth, opsRect;
+		var buildWindow;
+
+		windowRect = Rect(100, 100, 980, 520);
+		panelWidth = 300;
+		listHeight = 300;
+		headerHeight = 28;
+		footerHeight = 22;
+		pad = 10;
+
+		opsWidth = 320;
+		opsRect = Rect(2 * pad + 2 * panelWidth + 40, pad, opsWidth, windowRect.height - 2 * pad);
+
+		countdownSecondsDefault = 3.0;
+		opsCountdownSeconds = 3.0;
+		enableMetersFlag = true;
+
+		uiReadyFlag = false;
+		uiPendingActions = Array.new;
+
+		buildWindow = {
+			var metersHeight, greenBg, neutralBg;
+			var buildColumn, buildMeters, applyInitialHighlight;
+			var columnLeftX, columnRightX;
+			var columnLeftDict, columnRightDict;
+
+			metersHeight = 86;
+			greenBg = Color(0.85, 1.0, 0.85);
+			neutralBg = Color(0.92, 0.92, 0.92);
+
+			columnLeftX = pad;
+			columnRightX = pad + panelWidth + 40;
+
+			buildColumn = { arg xPos, title;
+				var panel, header, listView, effectiveLabel;
+				var headerRect, listRect, effRect, resultDict;
+
+				panel = CompositeView(window, Rect(xPos, pad, panelWidth, windowRect.height - 2 * pad - metersHeight));
+				panel.background_(neutralBg);
+
+				headerRect = Rect(0, 0, panelWidth, headerHeight);
+				header = StaticText(panel, headerRect).string_(title);
+				header.align_(\center);
+
+				listRect = Rect(0, headerHeight + 6, panelWidth, listHeight);
+				listView = ListView(panel, listRect).items_([]);
+
+				effRect = Rect(0, headerHeight + 6 + listHeight + 6, panelWidth, footerHeight);
+				effectiveLabel = StaticText(panel, effRect).string_("eff: —");
+				effectiveLabel.align_(\center);
+
+				resultDict = (panel: panel, header: header, list: listView, eff: effectiveLabel);
+				resultDict
+			};
+
+			buildMeters = {
+				var metersGroup, labelA, labelB, row1, row2, labelWidth, barWidth, rowHeight;
+
+				labelWidth = 60;
+				barWidth = windowRect.width - 2 * pad - labelWidth - 10;
+				rowHeight = 30;
+
+				metersGroup = CompositeView(window, Rect(pad, windowRect.height - metersHeight - pad, windowRect.width - 2 * pad, metersHeight));
+				metersGroup.background_(Color(0.96, 0.96, 0.96));
+
+				row1 = CompositeView(metersGroup, Rect(0, 0, metersGroup.bounds.width, rowHeight));
+				labelA = StaticText(row1, Rect(0, 4, labelWidth, 20)).string_("chainA");
+				meterViewA = LevelIndicator(row1, Rect(labelWidth + 6, 4, barWidth, 20));
+
+				row2 = CompositeView(metersGroup, Rect(0, rowHeight + 8, metersGroup.bounds.width, rowHeight));
+				labelB = StaticText(row2, Rect(0, 4, labelWidth, 20)).string_("chainB");
+				meterViewB = LevelIndicator(row2, Rect(labelWidth + 6, 4, barWidth, 20));
+			};
+
+			applyInitialHighlight = {
+				var currentBg, nextBg;
+				currentBg = greenBg;
+				nextBg = neutralBg;
+				if(leftPanel.notNil) { leftPanel.background_(currentBg) };
+				if(rightPanel.notNil) { rightPanel.background_(nextBg) };
+			};
+
+			window = Window("MagicDisplayGUI – CURRENT / NEXT", windowRect).front.alwaysOnTop_(true);
+
+			columnLeftDict = buildColumn.value(columnLeftX, "CURRENT");
+			leftPanel      = columnLeftDict[\panel];
+			leftHeader     = columnLeftDict[\header];
+			leftListView   = columnLeftDict[\list];
+			leftEffective  = columnLeftDict[\eff];
+
+			columnRightDict = buildColumn.value(columnRightX, "NEXT");
+			rightPanel      = columnRightDict[\panel];
+			rightHeader     = columnRightDict[\header];
+			rightListView   = columnRightDict[\list];
+			rightEffective  = columnRightDict[\eff];
+
+			expectationText = TextView(window, Rect(pad, leftPanel.bounds.bottom + 6, 2 * panelWidth + 40, 52));
+			expectationText.background_(Color(1, 1, 0.9));
+			expectationText.string_("Command:");
+
+			countdownLabel = StaticText(window, Rect(pad, expectationText.bounds.bottom + 6, 120, 20)).string_("Ready");
+
+			countdownBarView = UserView(window, Rect(pad + 130, expectationText.bounds.bottom + 6, panelWidth - 10, 20));
+			countdownBarView.background_(Color(0.9, 0.9, 0.9));
+			countdownBarView.drawFunc_({ arg view;
+				var barWidthNow, fullWidth, progressFraction, colorFill, progressStored;
+				progressStored = view.getProperty(\progress) ? 0.0;
+				progressFraction = progressStored.clip(0, 1);
+				fullWidth = view.bounds.width;
+				barWidthNow = fullWidth * progressFraction;
+				colorFill = Color(0.3, 0.8, 0.3);
+				Pen.fillColor = colorFill;
+				Pen.addRect(Rect(0, 0, barWidthNow, view.bounds.height));
+				Pen.fill;
+			});
+			countdownBarView.setProperty(\progress, 0.0);
+
+			opsItems = Array.new;
+			opsIndexNext = 0;
+			opsCallback = nil;
+
+			opsListView = ListView(window, opsRect).items_([]);
+			opsStatusText = StaticText(window, Rect(opsRect.left, opsRect.bottom - 52, opsRect.width - 110, 20)).string_("Next: —");
+			opsNextButton = Button(window, Rect(opsRect.right - 100, opsRect.bottom - 56, 100, 28))
+			.states_([["Next (3s)", Color.white, Color(0, 0.5, 0)]])
+			.action_({
+				var nextIndexLocal, totalCountLocal, nextLabel;
+				nextIndexLocal = opsIndexNext;
+				totalCountLocal = opsItems.size;
+				if(nextIndexLocal >= totalCountLocal) { "No more operations.".postln; ^nil };
+				nextLabel = opsItems[nextIndexLocal];
+				this.startCountdown(opsCountdownSeconds, "Next: " ++ nextLabel, {
+					var clampedIndex;
+					clampedIndex = opsIndexNext.clip(0, opsItems.size - 1);
+					this.runNextOperation(clampedIndex);
+				});
+			});
+
+			buildMeters.value;
+			applyInitialHighlight.value;
+
+			uiReadyFlag = true;
+			this.flushUiPendingActions;
+		};
+
+		AppClock.sched(0, {
+			var enableNow;
+			buildWindow.value;
+			enableNow = enableMetersFlag;
+			if(enableNow) { this.enableMeters(true) };
+			nil
+		});
+
+		^this
+	}
+
+	// ui-ready helpers
+	queueUi { arg func;
+		var fn;
+		fn = func;
+		if(uiReadyFlag) {
+			AppClock.sched(0, { fn.value; nil });
+		}{
+			uiPendingActions = uiPendingActions.add(fn);
+		};
+	}
+
+	flushUiPendingActions {
+		var actionsToRun;
+		actionsToRun = uiPendingActions;
+		uiPendingActions = Array.new;
+		actionsToRun.do({ arg f;
+			AppClock.sched(0, { f.value; nil });
+		});
+	}
+
+	// visuals
+	highlightCurrentColumn {
+		var greenBg, neutralBg;
+		greenBg = Color(0.85, 1.0, 0.85);
+		neutralBg = Color(0.92, 0.92, 0.92);
+		this.queueUi({
+			if(leftPanel.notNil) { leftPanel.background_(greenBg) };
+			if(rightPanel.notNil) { rightPanel.background_(neutralBg) };
+		});
+	}
+
+	formatListTopDown { arg listRef, bypassKeys, effectiveList;
+		var itemsOut, lastIndex, processorsList, indexCounter, sourceKey, sinkKey, isBypassed, badge, lineText;
+		itemsOut = Array.new;
+		lastIndex = listRef.size - 1;
+		sinkKey = listRef[0];
+		sourceKey = listRef[lastIndex];
+
+		itemsOut = itemsOut.add("src  : " ++ sourceKey);
+
+		if(listRef.size > 2) {
+			itemsOut = itemsOut.add("procs:");
+			processorsList = listRef.copyRange(1, lastIndex - 1).reverse;
+			indexCounter = 1;
+			processorsList.do({ arg procKey;
+				isBypassed = bypassKeys.includes(procKey);
+				badge = if(isBypassed) { "[BYP]" } { "[ON]" };
+				lineText = "  [" ++ indexCounter ++ "] " ++ procKey ++ " " ++ badge;
+				itemsOut = itemsOut.add(lineText);
+				indexCounter = indexCounter + 1;
+			});
+		}{
+			itemsOut = itemsOut.add("procs: (none)");
+		};
+
+		itemsOut = itemsOut.add("sink : " ++ sinkKey);
+		itemsOut = itemsOut.add("eff  : " ++ effectiveList.join(" -> "));
+		^itemsOut
+	}
+
+	// expectation + countdown
+	showExpectation { arg textString, seconds = 0;
+		var secondsLocal, hasCountdown;
+		secondsLocal = seconds ? 0;
+		hasCountdown = secondsLocal > 0;
+
+		this.queueUi({
+			var labelNow;
+			if(expectationText.notNil) { expectationText.string_(textString.asString) };
+			if(hasCountdown) {
+				this.startCountdown(secondsLocal, "Listen in…", { nil });
+			}{
+				labelNow = "Ready";
+				if(countdownLabel.notNil) { countdownLabel.string_(labelNow) };
+				if(countdownBarView.notNil) {
+					countdownBarView.setProperty(\progress, 0.0);
+					countdownBarView.refresh;
+				};
+			};
+		});
+	}
+
+	startCountdown { arg seconds, labelText, onFinishedFunc;
+		var secondsClamped, startTime, stopTime;
+		secondsClamped = seconds.clip(0.5, 10.0);
+		startTime = Main.elapsedTime;
+		stopTime = startTime + secondsClamped;
+
+		if(countdownTask.notNil) { countdownTask.stop; countdownTask = nil };
+
+		this.queueUi({
+			var finishedFlag, delaySeconds, updateAndCheckDone;
+
+			if(countdownLabel.notNil) { countdownLabel.string_(labelText.asString ++ " (" ++ secondsClamped.asString ++ "s)") };
+			if(countdownBarView.notNil) {
+				countdownBarView.setProperty(\progress, 0.0);
+				countdownBarView.refresh;
+			};
+
+			finishedFlag = false;
+			delaySeconds = 0.05;
+
+			updateAndCheckDone = {
+				var nowTime, remainingSeconds, progressFraction;
+				nowTime = Main.elapsedTime;
+				remainingSeconds = (stopTime - nowTime).max(0);
+				progressFraction = ((secondsClamped - remainingSeconds) / secondsClamped).clip(0.0, 1.0);
+
+				if(countdownLabel.notNil) { countdownLabel.string_(labelText.asString ++ " (" ++ remainingSeconds.round(0.1).asString ++ "s)") };
+				if(countdownBarView.notNil) {
+					countdownBarView.setProperty(\progress, progressFraction);
+					countdownBarView.refresh;
+				};
+
+				if(remainingSeconds <= 0) { finishedFlag = true };
+			};
+
+			countdownTask = Task({
+				var localFinished;
+				localFinished = false;
+				while({ localFinished.not }, {
+					updateAndCheckDone.value;
+					localFinished = finishedFlag;
+					delaySeconds.wait;
+				});
+				if(countdownLabel.notNil) { countdownLabel.string_("Now") };
+				if(onFinishedFunc.notNil) { onFinishedFunc.value };
+			}, AppClock).play;
+		});
+	}
+
+	// operations
+	setOperations { arg itemsArray;
+		var itemsSafe, entryStrings;
+		itemsSafe = itemsArray ? Array.new;
+		entryStrings = itemsSafe.collect({ arg it; it.asString });
+
+		this.queueUi({
+			opsItems = entryStrings;
+			if(opsListView.notNil) { opsListView.items_(opsItems) };
+			opsIndexNext = 0;
+			this.updateOpsHighlight;
+		});
+	}
+
+	setNextAction { arg func;
+		var f;
+		f = func;
+		opsCallback = f;
+	}
+
+	runNextOperation { arg indexToRun;
+		var totalCount, nextIndexComputed;
+		totalCount = opsItems.size;
+
+		if(opsCallback.notNil) {
+			opsCallback.value(indexToRun);
+		}{
+			("[ops] No callback for index " ++ indexToRun).warn;
+		};
+
+		nextIndexComputed = (indexToRun + 1).clip(0, totalCount);
+		opsIndexNext = nextIndexComputed;
+		this.updateOpsHighlight;
+	}
+
+	updateOpsHighlight {
+		var totalCount, entryStrings, nextIndexLocal, statusText;
+		totalCount = opsItems.size;
+		nextIndexLocal = opsIndexNext.min(totalCount);
+
+		entryStrings = opsItems.collect({ arg item, idx;
+			var marker;
+			marker = if(idx == opsIndexNext) { "→ " } { "   " };
+			marker ++ item
+		});
+
+		statusText = if(opsIndexNext < totalCount) {
+			"Next: " ++ opsItems[opsIndexNext]
+		}{
+			"Done."
+		};
+
+		this.queueUi({
+			if(opsListView.notNil) { opsListView.items_(entryStrings) };
+			if(opsStatusText.notNil) { opsStatusText.string_(statusText) };
+		});
+	}
+
+	/////////////////
+	// meters
+	// --- canonical enableMeters: waits until sinks are audio-rate, then attaches meters ---
+// MagicDisplayGUI.sc
+// canonical enableMeters: resend SynthDefs every time; wait until sinks are audio-rate
+enableMeters { arg flag = true;
+    var shouldEnable, aOK, bOK, busA, busB;
+
+    // When enabling, wait until sinks are audio-rate (no control-rate bus warnings)
+    if(flag) {
+        busA = Ndef(\chainA).bus;
+        busB = Ndef(\chainB).bus;
+        aOK = busA.notNil and: { busA.rate == \audio };
+        bOK = busB.notNil and: { busB.rate == \audio };
+        if(aOK.not or: { bOK.not }) {
+            AppClock.sched(0.20, { this.enableMeters(true); nil });
+            ^this;
+        };
+        // Also guard against server being off
+        if(Server.default.serverRunning.not) {
+            AppClock.sched(0.20, { this.enableMeters(true); nil });
+            ^this;
+        };
+    };
+
+    shouldEnable = flag ? true;
+    enableMetersFlag = shouldEnable;
+
+    if(shouldEnable) {
+        Server.default.bind({
+            var busA_local, busB_local;
+
+            // Always (re)send SynthDefs so they exist on the server now.
+            SynthDef(\busMeterA, { arg inBus, rate = 15;
+                var sig = In.ar(inBus, 2);
+                var amp = Amplitude.ar(sig).clip(0, 1);
+                SendReply.kr(Impulse.kr(rate), '/ampA', A2K.kr(amp));
+            }).add;
+            SynthDef(\busMeterB, { arg inBus, rate = 15;
+                var sig = In.ar(inBus, 2);
+                var amp = Amplitude.ar(sig).clip(0, 1);
+                SendReply.kr(Impulse.kr(rate), '/ampB', A2K.kr(amp));
+            }).add;
+
+            if(meterSynthA.notNil) { meterSynthA.free };
+            if(meterSynthB.notNil) { meterSynthB.free };
+
+            busA_local = Ndef(\chainA).bus;
+            busB_local = Ndef(\chainB).bus;
+
+            meterSynthA = Synth(\busMeterA, [\inBus, busA_local.index, \rate, 24],
+                target: Server.default.defaultGroup, addAction: \addToTail);
+            meterSynthB = Synth(\busMeterB, [\inBus, busB_local.index, \rate, 24],
+                target: Server.default.defaultGroup, addAction: \addToTail);
+        });
+
+        if(oscA.notNil) { oscA.free };
+        if(oscB.notNil) { oscB.free };
+        oscA = OSCdef(\ampA, { arg msg;
+            var leftAmp, rightAmp, levelAvg;
+            leftAmp = msg[3]; rightAmp = msg[4];
+            levelAvg = ((leftAmp + rightAmp) * 0.5).clip(0, 1);
+            AppClock.sched(0, { if(meterViewA.notNil) { meterViewA.value_(levelAvg) }; nil });
+        }, '/ampA');
+        oscB = OSCdef(\ampB, { arg msg;
+            var leftAmp, rightAmp, levelAvg;
+            leftAmp = msg[3]; rightAmp = msg[4];
+            levelAvg = ((leftAmp + rightAmp) * 0.5).clip(0, 1);
+            AppClock.sched(0, { if(meterViewB.notNil) { meterViewB.value_(levelAvg) }; nil });
+        }, '/ampB');
+        ^this;
+
+    } {
+        Server.default.bind({
+            if(meterSynthA.notNil) { meterSynthA.free; meterSynthA = nil; };
+            if(meterSynthB.notNil) { meterSynthB.free; meterSynthB = nil; };
+        });
+        if(oscA.notNil) { oscA.free; oscA = nil; };
+        if(oscB.notNil) { oscB.free; oscB = nil; };
+        AppClock.sched(0, {
+            if(meterViewA.notNil) { meterViewA.value_(0.0) };
+            if(meterViewB.notNil) { meterViewB.value_(0.0) };
+            nil
+        });
+        ^this;
+    };
+}
+
+/*	enableMeters { arg flag = true;
+		var shouldEnable, aOK, bOK, busA, busB;
+
+		// Only guard when enabling
+		if(flag) {
+			// read buses once
+			busA = Ndef(\chainA).bus;
+			busB = Ndef(\chainB).bus;
+			// both must exist and be audio-rate
+			aOK = busA.notNil and: { busA.rate == \audio };
+			bOK = busB.notNil and: { busB.rate == \audio };
+			if(aOK.not or: { bOK.not }) {
+				// retry shortly on AppClock; do not mutate the audio tree here
+				AppClock.sched(0.20, { this.enableMeters(true); nil });
+				^this;
+			};
+		};
+
+		shouldEnable = flag ? true;
+		enableMetersFlag = shouldEnable;
+
+		if(shouldEnable) {
+			// --- enable path (unchanged except for the pre-check above) ---
+			Server.default.bind({
+				var hasA, hasB, busA_local, busB_local;
+				hasA = SynthDescLib.global.at(\busMeterA).notNil;
+				hasB = SynthDescLib.global.at(\busMeterB).notNil;
+				if(hasA.not) {
+					SynthDef(\busMeterA, { arg inBus, rate = 15;
+						var sig, amp;
+						sig = In.ar(inBus, 2);
+						amp = Amplitude.ar(sig).clip(0, 1);
+						SendReply.kr(Impulse.kr(rate), '/ampA', A2K.kr(amp));
+					}).add;
+				};
+				if(hasB.not) {
+					SynthDef(\busMeterB, { arg inBus, rate = 15;
+						var sig, amp;
+						sig = In.ar(inBus, 2);
+						amp = Amplitude.ar(sig).clip(0, 1);
+						SendReply.kr(Impulse.kr(rate), '/ampB', A2K.kr(amp));
+					}).add;
+				};
+				if(meterSynthA.notNil) { meterSynthA.free };
+				if(meterSynthB.notNil) { meterSynthB.free };
+				// read buses post-guard
+				busA_local = Ndef(\chainA).bus;
+				busB_local = Ndef(\chainB).bus;
+				meterSynthA = Synth(\busMeterA, [\inBus, busA_local.index, \rate, 24],
+					target: Server.default.defaultGroup, addAction: \addToTail);
+				meterSynthB = Synth(\busMeterB, [\inBus, busB_local.index, \rate, 24],
+					target: Server.default.defaultGroup, addAction: \addToTail);
+			});
+
+			if(oscA.notNil) { oscA.free };
+			if(oscB.notNil) { oscB.free };
+			oscA = OSCdef(\ampA, { arg msg;
+				var leftAmp, rightAmp, levelAvg;
+				leftAmp = msg[3]; rightAmp = msg[4];
+				levelAvg = ((leftAmp + rightAmp) * 0.5).clip(0, 1);
+				AppClock.sched(0, { if(meterViewA.notNil) { meterViewA.value_(levelAvg) }; nil });
+			}, '/ampA');
+			oscB = OSCdef(\ampB, { arg msg;
+				var leftAmp, rightAmp, levelAvg;
+				leftAmp = msg[3]; rightAmp = msg[4];
+				levelAvg = ((leftAmp + rightAmp) * 0.5).clip(0, 1);
+				AppClock.sched(0, { if(meterViewB.notNil) { meterViewB.value_(levelAvg) }; nil });
+			}, '/ampB');
+			^this;
+
+		} {
+			// --- disable path (unchanged) ---
+			Server.default.bind({
+				if(meterSynthA.notNil) { meterSynthA.free; meterSynthA = nil; };
+				if(meterSynthB.notNil) { meterSynthB.free; meterSynthB = nil; };
+			});
+			if(oscA.notNil) { oscA.free; oscA = nil; };
+			if(oscB.notNil) { oscB.free; oscB = nil; };
+			AppClock.sched(0, {
+				if(meterViewA.notNil) { meterViewA.value_(0.0) };
+				if(meterViewB.notNil) { meterViewB.value_(0.0) };
+				nil
+			});
+			^this;
+		};
+	}
+*/
+
+	///////////////
+
+	// display hooks
+	showInit { arg pedalboard, versionString, current, next;
+		var titleText;
+		titleText = "MagicDisplayGUI – " ++ versionString;
+		this.queueUi({
+			if(window.notNil) { window.name_(titleText) };
+		});
+	}
+
+	showRebuild { arg which, fullChain, effective;
+		var infoText;
+		infoText = "[MPB:rebuild:" ++ which ++ "] full=" ++ fullChain ++ " effective=" ++ effective;
+		AppClock.sched(0, { infoText.postln; nil });
+	}
+
+	showPlay { arg sinkKey;
+		var text;
+		text = "[MPB:play] sink=" ++ sinkKey;
+		AppClock.sched(0, { text.postln; nil });
+	}
+
+	showStop { arg sinkKey;
+		var text;
+		text = "[MPB:stop] sink=" ++ sinkKey;
+		AppClock.sched(0, { text.postln; nil });
+	}
+
+	showSwitch { arg oldSink, newSink, current, next;
+		var infoText;
+		infoText = "[MPB:switch] " ++ oldSink ++ " → " ++ newSink;
+		this.queueUi({
+			// keep window title stable; show transient text in labels instead
+			this.highlightCurrentColumn;
+			if(opsStatusText.notNil) {
+				opsStatusText.string_("Switched: " ++ oldSink ++ " → " ++ newSink);
+			}{
+				if(expectationText.notNil) {
+					expectationText.string_("Switched: " ++ oldSink ++ " → " ++ newSink);
+				};
+			};
+		});
+		AppClock.sched(0, { infoText.postln; nil });
+	}
+
+
+	showMutation { arg action, args, nextChain;
+		var text;
+		text = "[MPB:mutate] " ++ action ++ " " ++ args ++ " next=" ++ nextChain;
+		AppClock.sched(0, { text.postln; nil });
+	}
+
+	showBypass { arg which, key, state, chain, bypassKeys;
+		var text;
+		text = "[MPB:bypass:" ++ which ++ "] " ++ key ++ " -> " ++ state ++ " active=" ++ bypassKeys;
+		AppClock.sched(0, { text.postln; nil });
+	}
+
+	showReset { arg current, next;
+		var text;
+		text = "[MPB:reset] current=" ++ current ++ " next=" ++ next;
+		AppClock.sched(0, { text.postln; nil });
+	}
+
+	showChainsDetailed { arg current, next, bypassAKeys, bypassBKeys, effCurrent, effNext;
+		var currentItems, nextItems, effCurrentText, effNextText;
+		currentItems = this.formatListTopDown(current, bypassAKeys, effCurrent);
+		nextItems = this.formatListTopDown(next,   bypassBKeys, effNext);
+		effCurrentText = "eff: " ++ effCurrent.join(" -> ");
+		effNextText    = "eff: " ++ effNext.join(" -> ");
+
+		this.queueUi({
+			if(leftHeader.notNil)  { leftHeader.string_("CHAIN A ACTIVE") };
+			if(rightHeader.notNil) { rightHeader.string_("CHAIN B NEXT") };
+			if(leftListView.notNil)  { leftListView.items_(currentItems) };
+			if(rightListView.notNil) { rightListView.items_(nextItems) };
+			if(leftEffective.notNil)  { leftEffective.string_(effCurrentText) };
+			if(rightEffective.notNil) { rightEffective.string_(effNextText) };
+		});
+	}
+
+	showError { arg message;
+		var text;
+		text = "[MPB:error] " ++ message;
+		AppClock.sched(0, { text.warn; nil });
+	}
+}
+/* MagicPedalboardNew.sc v0.4.6
+ A/B pedalboard chain manager built on Ndefs.
+
+ - Chains are Arrays of Symbols ordered [sink, …, source].
+ - Uses JITLib embedding: Ndef(left) <<> Ndef(right).
+ - Creates two sinks: \chainA and \chainB, and plays the current chain on init.
+ - Most mutators act on the next chain; explicit current-chain bypass helpers are provided.
+ - Optional display adaptor (MagicDisplay / MagicDisplayGUI) receives notifications, including detailed chain views.
+ - Non-destructive rebuilds (no server resets during rebuild). Only .reset performs a safe server-tree reset.
+ // MD 20250912-1838
+*/
+MagicPedalboardNew : Object {
+
+	// ───────────────────────────────────────────────────────────────
+	// class metadata
+	// ───────────────────────────────────────────────────────────────
+	classvar <version;
+
+	// ───────────────────────────────────────────────────────────────
+	// instance state
+	// ───────────────────────────────────────────────────────────────
+	var <currentChain;     // read-only pointer to Array of Symbols
+	var <nextChain;        // read-only pointer to Array of Symbols
+	var chainAList;        // [\chainA, ...processors..., source]
+	var chainBList;        // [\chainB, ...processors..., source]
+	var bypassA;           // IdentityDictionary: key(Symbol) -> Bool
+	var bypassB;           // IdentityDictionary: key(Symbol) -> Bool
+	var <defaultNumChannels;
+	var <defaultSource;
+	var <display;          // optional display adaptor
+	var < processorLib;
+
+	*initClass {
+		var text;
+		version = "v0.4.6";
+		text = "MagicPedalboardNew " ++ version;
+		text.postln;
+	}
+
+	*new { arg disp = nil;
+		var instance;
+		instance = super.new;
+		^instance.init(disp);
+	}
+
+	init { arg disp;
+		var sinkFunc;
+		display = disp;
+		defaultNumChannels = 2;
+		defaultSource = \ts0;
+
+		// less good than the version below
+		// sinkFunc = { arg inSignal; inSignal };
+
+
+		sinkFunc = {
+			var inputSignal;
+			inputSignal = \in.ar(defaultNumChannels);
+			inputSignal
+		};
+
+		Ndef(\chainA, sinkFunc);
+		Ndef(\chainB, sinkFunc);
+
+		// Guarantee sink buses are audio-rate early (prevents kr-meter races)
+		Server.default.bind({
+			Ndef(\chainA).ar(defaultNumChannels);  // typically 2
+			Ndef(\chainB).ar(defaultNumChannels);
+		});
+
+
+		chainAList = [\chainA, defaultSource];
+		chainBList = [\chainB, defaultSource];
+
+		bypassA = IdentityDictionary.new;
+		bypassB = IdentityDictionary.new;
+
+		currentChain = chainAList;
+		nextChain = chainBList;
+
+		Server.default.bind({
+			this.rebuildUnbound(nextChain); // stays stopped
+			this.rebuildUnbound(currentChain); // plays
+		});
+
+/*		this.rebuild(currentChain);
+		this.rebuild(nextChain);*/
+
+/*        Server.default.bind({
+            Ndef(\chainA).play(numChannels: defaultNumChannels);
+        });*/
+
+		if(display.notNil) {
+			display.showInit(this, version, currentChain, nextChain);
+		};
+
+		// enforce exclusive invariant (Option A) at first bring-up
+		this.enforceExclusiveCurrentOptionA(0.1);
+
+		^this
+	}
+
+	// ───────────────────────────────────────────────────────────────
+	// public API
+	// ───────────────────────────────────────────────────────────────
+
+
+	// add a setter (public)
+	setProcessorLib { arg lib;
+		processorLib = lib;
+	}
+
+	setDisplay { arg disp;
+		var shouldShow;
+		display = disp;
+		shouldShow = display.notNil;
+		if(shouldShow) {
+			display.showInit(this, version, currentChain, nextChain);
+		};
+	}
+
+	help {
+		var text;
+		text = String.new;
+		text = text
+		++ "MagicPedalboardNew " ++ version ++ "\n"
+		++ "Chains are Arrays of Symbols ordered [sink, …, source].\n"
+		++ "On init, creates \\chainA and \\chainB and plays CURRENT.\n\n"
+		++ "Core methods (operate mostly on the *next* chain):\n"
+		++ " printChains\n"
+		++ " playCurrent, stopCurrent, switchChain([fadeTime])\n"
+		++ " add(key), addAt(key, index)\n"
+		++ " removeAt(index), swap(indexA, indexB)\n"
+		++ " bypass(key, state=true), bypassAt(index, state=true)\n"
+		++ " clearChain\n"
+		++ "Current-chain bypass helpers:\n"
+		++ " bypassCurrent(key, state=true), bypassAtCurrent(index, state=true)\n"
+		++ "Diagnostics/helpers:\n"
+		++ " effectiveCurrent, effectiveNext, bypassKeysCurrent, bypassKeysNext, reset\n"
+		++ "Source setters:\n"
+		++ " setSource(key) [next], setSourceCurrent(key) [current]\n";
+		text.postln;
+	}
+
+	// Detailed printing routed through display if available
+	printChains {
+		var bypassAKeys, bypassBKeys, effectiveA, effectiveB, hasDisplay;
+		var headerFunc, formatOne;
+
+		bypassAKeys = this.bypassKeysForListInternal(chainAList);
+		bypassBKeys = this.bypassKeysForListInternal(chainBList);
+		effectiveA = this.effectiveListForInternal(chainAList);
+		effectiveB = this.effectiveListForInternal(chainBList);
+		hasDisplay = display.notNil and: { display.respondsTo(\showChainsDetailed) };
+
+		if(hasDisplay) {
+			display.showChainsDetailed(
+				chainAList, chainBList,
+				bypassAKeys, bypassBKeys,
+				effectiveA, effectiveB
+			);
+		}{
+			headerFunc = { arg titleString;
+				var lineText;
+				lineText = "==== " ++ titleString ++ " ====";
+				lineText.postln;
+			};
+
+			formatOne = { arg titleString, listRef, bypassKeys, effectiveList;
+				var sinkKey, sourceKey, lastIndex, indexCounter, processorsList, lineText, isBypassed, markText;
+				lastIndex = listRef.size - 1;
+				sinkKey = listRef[0];
+				sourceKey = listRef[lastIndex];
+
+				headerFunc.(titleString);
+				("src : " ++ sourceKey).postln;
+
+				if(listRef.size > 2) {
+					"procs:".postln;
+					processorsList = listRef.copyRange(1, lastIndex - 1);
+					indexCounter = 1;
+					processorsList.do({ arg procKey;
+						isBypassed = bypassKeys.includes(procKey);
+						markText = if(isBypassed) { "BYP" } { "ON " };
+						lineText = " [" ++ indexCounter ++ "] " ++ procKey ++ " (" ++ markText ++ ")";
+						lineText.postln;
+						indexCounter = indexCounter + 1;
+					});
+				}{
+					"procs: (none)".postln;
+				};
+
+				("sink: " ++ sinkKey).postln;
+				("eff : " ++ effectiveList.join(" -> ")).postln;
+				"".postln;
+			};
+
+			formatOne.("CURRENT", chainAList, bypassAKeys, effectiveA);
+			formatOne.("NEXT",    chainBList, bypassBKeys, effectiveB);
+		};
+	}
+
+	playCurrent {
+		var sinkKey, canRun;
+		sinkKey = currentChain[0];
+		canRun = this.ensureServerTree;
+		if(canRun.not) { ^this };
+		this.rebuild(currentChain);
+		Server.default.bind({
+			Ndef(sinkKey).play(numChannels: defaultNumChannels);
+		});
+		if(display.notNil) {
+			display.showPlay(sinkKey);
+		};
+		// enforce exclusive invariant (Option A) after play
+		this.enforceExclusiveCurrentOptionA(0.1);
+
+	}
+
+	stopCurrent {
+		var sinkKey, canRun;
+		sinkKey = currentChain[0];
+		canRun = this.ensureServerTree;
+		if(canRun.not) { ^this };
+		Server.default.bind({
+			Ndef(sinkKey).stop;
+		});
+		if(display.notNil) {
+			display.showStop(sinkKey);
+		};
+	}
+
+	// Crossfading chain switch (default 0.1 s, clamped to ~80–200 ms)
+	switchChain { arg fadeTime = 0.1;
+		var temporaryList, oldSinkKey, newSinkKey, actualFadeTime, canRun;
+		canRun = this.ensureServerTree;
+		if(canRun.not) { ^this };
+
+		actualFadeTime = fadeTime.clip(0.08, 0.2);
+		oldSinkKey = currentChain[0];
+		newSinkKey = nextChain[0];
+
+		Server.default.bind({
+			// set fade durations
+			Ndef(oldSinkKey).fadeTime_(actualFadeTime);
+			Ndef(newSinkKey).fadeTime_(actualFadeTime);
+
+			// prebuild NEXT so it is ready, then start it (will fade in)
+			this.rebuildUnbound(nextChain);
+			Ndef(newSinkKey).play(numChannels: defaultNumChannels);
+
+			// stop OLD (will fade out)
+			Ndef(oldSinkKey).stop;
+
+			// swap pointers
+			temporaryList = currentChain;
+			currentChain = nextChain;
+			nextChain = temporaryList;
+
+			// ensure both chains are in correct post-swap state
+			this.rebuildUnbound(currentChain);
+			this.rebuildUnbound(nextChain);
+		});
+
+		// enforce exclusivity post-swap (CURRENT uses actualFadeTime, NEXT silenced)
+		this.enforceExclusiveCurrentOptionA(actualFadeTime);
+
+		if(display.notNil) {
+			display.showSwitch(oldSinkKey, currentChain[0], currentChain, nextChain);
+		};
+	}
+
+	// ─── next-chain mutations ─────────────────────────────────────
+	add { arg key;
+		var insertIndex;
+		insertIndex = nextChain.size - 1;
+		this.addAt(key, insertIndex);
+		if(display.notNil) { display.showMutation(\add, [key], nextChain) };
+	}
+
+	addAt { arg key, index;
+		var indexClamped, newList;
+		indexClamped = index.clip(1, nextChain.size - 1);
+		newList = nextChain.insert(indexClamped, key);
+		this.setNextListInternal(newList);
+		this.rebuild(nextChain);
+		if(display.notNil) { display.showMutation(\addAt, [key, indexClamped], nextChain) };
+	}
+
+	removeAt { arg index;
+		var sizeNow, lastIndex, newList, removedKey;
+		sizeNow = nextChain.size;
+		lastIndex = sizeNow - 1;
+
+		if(sizeNow <= 2) {
+			if(display.notNil) { display.showError("removeAt refused: need at least [sink, source]") }
+			{ "refuse to remove: need at least [sink, source]".postln };
+		}{
+			if((index == 0) or: { index == lastIndex }) {
+				if(display.notNil) { display.showError("removeAt refused: cannot remove sink or source") }
+				{ "refuse to remove sink or source".postln };
+			}{
+				removedKey = nextChain[index];
+				newList = nextChain.copy;
+				newList.removeAt(index);
+				this.setNextListInternal(newList);
+				this.bypassDictForListInternal(nextChain).removeAt(removedKey);
+				this.rebuild(nextChain);
+				if(display.notNil) { display.showMutation(\removeAt, [index, removedKey], nextChain) };
+			};
+		};
+	}
+
+	swap { arg indexAParam, indexBParam;
+		var lastIndex, indexA, indexB, newList, tempKey;
+		lastIndex = nextChain.size - 1;
+		indexA = indexAParam.clip(1, lastIndex - 1);
+		indexB = indexBParam.clip(1, lastIndex - 1);
+
+		if(indexA == indexB) {
+			// nothing to do
+		}{
+			newList = nextChain.copy;
+			tempKey = newList[indexA];
+			newList[indexA] = newList[indexB];
+			newList[indexB] = tempKey;
+			this.setNextListInternal(newList);
+			this.rebuild(nextChain);
+			if(display.notNil) { display.showMutation(\swap, [indexA, indexB], nextChain) };
+		};
+	}
+
+	clearChain {
+		var sinkKey, sourceKey, newList;
+		if(nextChain.size < 2) { ^this };
+		sinkKey = nextChain[0];
+		sourceKey = nextChain[nextChain.size - 1];
+		newList = [sinkKey, sourceKey];
+		this.setNextListInternal(newList);
+		this.bypassDictForListInternal(nextChain).clear;
+		this.rebuild(nextChain);
+		if(display.notNil) { display.showMutation(\clearChain, [], nextChain) };
+	}
+
+	bypass { arg key, state = true;
+		var dict;
+		dict = this.bypassDictForListInternal(nextChain);
+		dict[key] = state;
+		this.rebuild(nextChain);
+		if(display.notNil) {
+			display.showBypass(\next, key, state, nextChain, this.bypassKeysForListInternal(nextChain));
+		};
+	}
+
+	bypassAt { arg index, state = true;
+		var lastIndex, clampedIndex, keyAtIndex;
+		lastIndex = nextChain.size - 1;
+		clampedIndex = index.clip(1, lastIndex - 1);
+		keyAtIndex = nextChain[clampedIndex];
+		this.bypass(keyAtIndex, state);
+	}
+
+	// ─── current-chain bypass ─────────────────────────────────────
+	bypassCurrent { arg key, state = true;
+		var dict;
+		dict = this.bypassDictForListInternal(currentChain);
+		dict[key] = state;
+		this.rebuild(currentChain);
+		if(display.notNil) {
+			display.showBypass(\current, key, state, currentChain, this.bypassKeysForListInternal(currentChain));
+		};
+	}
+
+	bypassAtCurrent { arg index, state = true;
+		var lastIndex, clampedIndex, keyAtIndex;
+		lastIndex = currentChain.size - 1;
+		clampedIndex = index.clip(1, lastIndex - 1);
+		keyAtIndex = currentChain[clampedIndex];
+		this.bypassCurrent(keyAtIndex, state);
+	}
+
+	// ─── source setters ───────────────────────────────────────────
+	setSource { arg key;
+		var newList, lastIndex;
+		lastIndex = nextChain.size - 1;
+		newList = nextChain.copy;
+		newList[lastIndex] = key;
+		this.setNextListInternal(newList);
+		this.rebuild(nextChain);
+		if(display.notNil) { display.showMutation(\setSource, [key], nextChain) };
+	}
+
+	setSourceCurrent { arg key;
+		var newList, lastIndex, isAList;
+		lastIndex = currentChain.size - 1;
+		newList = currentChain.copy;
+		newList[lastIndex] = key;
+		isAList = (currentChain === chainAList);
+		if(isAList) { chainAList = newList; currentChain = chainAList } { chainBList = newList; currentChain = chainBList };
+		this.rebuild(currentChain);
+		if(display.notNil) { display.showMutation(\setSourceCurrent, [key], currentChain) };
+	}
+
+	// ─── diagnostics helpers ──────────────────────────────────────
+	effectiveCurrent { ^this.effectiveListForInternal(currentChain) }
+	effectiveNext    { ^this.effectiveListForInternal(nextChain) }
+	bypassKeysCurrent { ^this.bypassKeysForListInternal(currentChain) }
+	bypassKeysNext    { ^this.bypassKeysForListInternal(nextChain) }
+
+	reset {
+		var sinkAKey, sinkBKey, canRun;
+		sinkAKey = \chainA;
+		sinkBKey = \chainB;
+
+		chainAList = [sinkAKey, defaultSource];
+		chainBList = [sinkBKey, defaultSource];
+
+		bypassA.clear;
+		bypassB.clear;
+
+		currentChain = chainAList;
+		nextChain = chainBList;
+
+		canRun = this.ensureServerTree;
+		if(canRun.not) { ^this };
+
+		Server.default.bind({
+			// soft reset: stop both, then rebuild clean connections
+			Ndef(sinkAKey).stop;
+			Ndef(sinkBKey).stop;
+
+			// Rebuild NEXT first (stays stopped), then CURRENT (plays)
+			this.rebuildUnbound(nextChain);
+			this.rebuildUnbound(currentChain);
+		});
+
+		// enforce exclusive invariant (Option A): CURRENT audible; NEXT silent
+		this.enforceExclusiveCurrentOptionA(0.1);
+
+		if(display.notNil) { display.showReset(currentChain, nextChain) };
+	}
+
+
+
+/*    OLDreset {
+        var sinkAKey, sinkBKey;
+        sinkAKey = \chainA;
+        sinkBKey = \chainB;
+
+        chainAList = [sinkAKey, defaultSource];
+        chainBList = [sinkBKey, defaultSource];
+
+        bypassA.clear;
+        bypassB.clear;
+
+        currentChain = chainAList;
+        nextChain = chainBList;
+
+        // SAFE server reset ONLY here, using Server.default.* (not 's')
+        Server.default.waitForBoot({
+            Server.default.bind({
+                Server.default.initTree;
+                Server.default.defaultGroup.freeAll;
+
+                this.rebuildUnbound(nextChain);
+                this.rebuildUnbound(currentChain);
+
+                Ndef(sinkBKey).stop;
+                Ndef(sinkAKey).play(numChannels: defaultNumChannels);
+            });
+        });
+
+        if(display.notNil) { display.showReset(currentChain, nextChain) };
+    }*/
+
+	// ───────────────────────────────────────────────────────────────
+	// internal helpers (lowercase, no leading underscore)
+	// ───────────────────────────────────────────────────────────────
+	setNextListInternal { arg newList;
+		var isAList;
+		isAList = nextChain === chainAList;
+		if(isAList) { chainAList = newList; nextChain = chainAList } { chainBList = newList; nextChain = chainBList };
+	}
+
+	bypassDictForListInternal { arg listRef;
+		^if(listRef === chainAList) { bypassA } { bypassB }
+	}
+
+	bypassKeysForListInternal { arg listRef;
+		var dict, keysBypassed;
+		dict = this.bypassDictForListInternal(listRef);
+		keysBypassed = Array.new;
+		dict.keysValuesDo({ arg key, state;
+			if(state == true) { keysBypassed = keysBypassed.add(key) };
+		});
+		^keysBypassed
+	}
+
+	ensureStereoInternal { arg key;
+		var proxyBus, needsInit;
+		proxyBus = Ndef(key).bus;
+		needsInit = proxyBus.isNil or: { proxyBus.rate != \audio } or: { proxyBus.numChannels != defaultNumChannels };
+		if(needsInit) {
+			Ndef(key).ar(defaultNumChannels);
+		};
+	}
+
+	// Non-destructive: guard only; do not reset here
+	ensureServerTree {
+		var serverIsRunning;
+		serverIsRunning = Server.default.serverRunning;
+		^serverIsRunning
+	}
+
+//
+// v0.4.6 change
+
+
+enforceExclusiveCurrentOptionA { arg fadeCurrent = 0.1;
+    var currentSink, nextSink, chans, fadeCur;
+    currentSink = currentChain[0];
+    nextSink    = nextChain[0];
+    chans       = defaultNumChannels;
+    fadeCur     = fadeCurrent.clip(0.05, 0.2);
+
+    Server.default.bind({
+        // CURRENT: robust \in.ar, stereo shape pinned, playing
+        Ndef(currentSink, { \in.ar(chans) });
+        Ndef(currentSink).mold(chans, \audio);   // authoritative shape
+        Ndef(currentSink).fadeTime_(fadeCur);
+        if(Ndef(currentSink).isPlaying.not) {
+            Ndef(currentSink).play(numChannels: chans);
+        };
+
+        // NEXT: hard-silence + ensure flag drops
+        // 1) silence source, then .stop (no audio either way)
+        Ndef(nextSink, { Silent.ar(chans) });
+        Ndef(nextSink).mold(chans, \audio);
+        Ndef(nextSink).fadeTime_(0.01);
+        Ndef(nextSink).stop;
+
+        // 2) drop monitor/flag deterministically, then re-establish silent sink
+        Ndef(nextSink).end;                      // frees inner players, "stop listen" (NodeProxy help)
+        Ndef(nextSink, { Silent.ar(chans) });    // keep NEXT present & silent for prebuild
+        Ndef(nextSink).mold(chans, \audio);
+        // do NOT play NEXT
+    });
+
+    ^this
+}
+
+/*	enforceExclusiveCurrentOptionA { arg fadeCurrent = 0.1;
+		var currentSink, nextSink, chans, fadeCur;
+		currentSink = currentChain[0];
+		nextSink = nextChain[0];
+		chans = defaultNumChannels;
+		fadeCur = fadeCurrent.clip(0.05, 0.2);
+
+		Server.default.bind({
+			// CURRENT: robust sink that consumes embedded input; ensure playing
+			Ndef(currentSink, { \in.ar(chans) });
+			Ndef(currentSink).ar(chans);
+			Ndef(currentSink).fadeTime_(fadeCur);
+			if (Ndef(currentSink).isPlaying.not) {
+				Ndef(currentSink).play(numChannels: chans)
+			};
+
+			// NEXT: hard silence at the sink source; stop its monitor quickly
+			Ndef(nextSink, { Silent.ar(chans) });
+			Ndef(nextSink).ar(chans);
+			Ndef(nextSink).fadeTime_(0.01);
+			Ndef(nextSink).stop;
+		});
+
+		^this
+	}*/
+
+
+	effectiveListForInternal { arg listRef;
+		var dict, resultList, lastIndex, isProcessor, isBypassed;
+		dict = this.bypassDictForListInternal(listRef);
+		resultList = Array.new;
+		lastIndex = listRef.size - 1;
+
+		listRef.do({ arg key, indexPosition;
+			isProcessor = (indexPosition > 0) and: (indexPosition < lastIndex);
+			isBypassed = isProcessor and: { dict[key] == true };
+
+			if((indexPosition == 0) or: { indexPosition == lastIndex }) {
+				resultList = resultList.add(key);
+			}{
+				if(isBypassed.not) { resultList = resultList.add(key) };
+			};
+		});
+		^resultList
+	}
+
+	// Public rebuild: bundles server ops; guard only
+	rebuild { arg listRef;
+		var whichChain, canRun;
+		whichChain = if(listRef === currentChain) { \current } { \next };
+		canRun = this.ensureServerTree;
+		if(canRun.not) { ^this };
+
+		Server.default.bind({
+			this.rebuildUnbound(listRef);
+		});
+
+		if(display.notNil) {
+			display.showRebuild(whichChain, listRef, this.effectiveListForInternal(listRef));
+		};
+	}
+
+
+	// Internal rebuild that assumes we are already inside a server bind (no resets)
+	rebuildUnbound { arg listRef;
+		var effective, indexCounter, leftKey, rightKey, sinkKey, hasMinimum, shouldPlay, isPlaying;
+
+		hasMinimum = listRef.size >= 2;
+		if(hasMinimum.not) { ^this };
+
+		effective = this.effectiveListForInternal(listRef);
+		effective.do({ arg keySymbol; this.ensureStereoInternal(keySymbol) });
+
+		indexCounter = 0;
+		while({ indexCounter < (effective.size - 1) }, {
+			leftKey = effective[indexCounter];
+			rightKey = effective[indexCounter + 1];
+			Ndef(leftKey) <<> Ndef(rightKey);
+			indexCounter = indexCounter + 1;
+		});
+
+		sinkKey = effective[0];
+		shouldPlay = (listRef === currentChain);
+		isPlaying = Ndef(sinkKey).isPlaying;
+		if(shouldPlay) {
+			if(isPlaying.not) { Ndef(sinkKey).play(numChannels: defaultNumChannels) };
+		}{
+			if(isPlaying) { Ndef(sinkKey).stop };
+		};
+	}
+
+/*	// At end of rebuildUnbound
+	rebuildUnbound { arg listRef;
+		var effective, indexCounter, leftKey, rightKey, sinkKey, hasMinimum, shouldPlay, isPlaying;
+
+
+/*		if(processorLib.notNil) {
+			// Ask the lib to make sure each symbol in this chain has an Ndef with a function.
+			// It will quietly do nothing for unknown keys.
+			processorLib.ensureFromChain(listRef, defaultNumChannels);
+		};*/
+
+
+		hasMinimum = listRef.size >= 2;
+		if(hasMinimum.not) { ^this };
+
+		effective = this.effectiveListForInternal(listRef);
+		effective.do({ arg keySymbol; this.ensureStereoInternal(keySymbol) });
+
+		indexCounter = 0;
+		while({ indexCounter < (effective.size - 1) }, {
+			leftKey = effective[indexCounter];
+			rightKey = effective[indexCounter + 1];
+			Ndef(leftKey) <<> Ndef(rightKey);
+			indexCounter = indexCounter + 1;
+		});
+
+		sinkKey = effective[0];
+		shouldPlay = (listRef === currentChain);
+		isPlaying = Ndef(sinkKey).isPlaying;
+
+		if(shouldPlay) {
+			if(isPlaying.not) { Ndef(sinkKey).play(numChannels: defaultNumChannels) };
+		}{
+			if(isPlaying) { Ndef(sinkKey).stop };
+		};
+	}*/
+
+/* OLD   rebuildUnbound { arg listRef;
+        var effective, indexCounter, leftKey, rightKey, sinkKey, hasMinimum;
+        hasMinimum = listRef.size >= 2;
+        if(hasMinimum.not) { ^this };
+
+        effective = this.effectiveListForInternal(listRef);
+
+        effective.do({ arg keySymbol;
+            this.ensureStereoInternal(keySymbol);
+        });
+
+        indexCounter = 0;
+        while({ indexCounter < (effective.size - 1) }, {
+            leftKey = effective[indexCounter];
+            rightKey = effective[indexCounter + 1];
+            Ndef(leftKey) <<> Ndef(rightKey);
+            indexCounter = indexCounter + 1;
+        });
+
+		// sinkKey = effective[0];
+		// if(listRef === currentChain) {
+		// 	Ndef(sinkKey).play(numChannels: defaultNumChannels);
+		// }{
+		// 	Ndef(sinkKey).stop;
+		// };
+		// At the end of rebuildUnbound:
+		sinkKey = effective[0];
+		if(listRef === currentChain) {
+			if(Ndef(sinkKey).isPlaying.not) { Ndef(sinkKey).play(numChannels: defaultNumChannels) };
+		} {
+			if(Ndef(sinkKey).isPlaying) { Ndef(sinkKey).stop };
+		};
+
+    }*/
+}
+/* MagicProcessorLibrary.sc
+   Holds a registry of processor/source functions and can ensure Ndefs exist.
+   MD 20250913
+*/
+MagicProcessorLibrary : Object {
+    var <defs;           // IdentityDictionary: Symbol -> Function
+    var <defaultNumChannels;
+
+    *new { ^super.new.init }
+
+    init {
+        var empty;
+        defaultNumChannels = 2;
+        empty = IdentityDictionary.new;
+        defs = empty;
+        ^this
+    }
+
+    register { arg key, func;
+        defs[key] = func;
+        ^this
+    }
+
+    has { arg key;
+        ^defs.includesKey(key)
+    }
+
+    get { arg key;
+        ^defs[key]
+    }
+
+    keys { ^defs.keys }
+
+    // Create or update an Ndef for key
+    ensure { arg key, chans;
+        var func, numCh, canRun;
+        func = defs[key];
+        if(func.isNil) { ^this }; // silently ignore if not registered
+        numCh = chans ? defaultNumChannels;
+        canRun = Server.default.serverRunning;
+        if(canRun) {
+            Server.default.bind({
+                Ndef(key, func);
+                Ndef(key).ar(numCh);
+            });
+        };
+        ^this
+    }
+
+    // Ensure many keys at once
+    ensureMany { arg keyArray, chans;
+        keyArray.do({ arg key; this.ensure(key, chans) });
+        ^this
+    }
+
+    // Convenience: ensure whatever appears in a chain array
+    ensureFromChain { arg chainArray, chans;
+        var lastIndex, idx;
+        if(chainArray.isNil or: { chainArray.size < 2 }) { ^this };
+        lastIndex = chainArray.size - 1;
+        idx = 0;
+        while({ idx <= lastIndex }, {
+            this.ensure(chainArray[idx], chans);
+            idx = idx + 1;
+        });
+        ^this
+    }
+}
