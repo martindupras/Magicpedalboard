@@ -1,174 +1,3 @@
-// OneShot_BringUp_MagicPedalboardNew_GUI_Meters.scd
-// v0.1
-// MD 20250916-1608
-
-//
-// Purpose: single‑run bring‑up to audible baseline; robust sinks;
-//          retarget meters; quick FX switch demo.
-// Style: tilde vars, var-first, lowercase names, no server.sync,
-//        server ops inside Server.default.bind.
-
-(
-var log, step, delayA, doBoot, ensureSinks, ensureGuiMpb, ensureSource,
-    enforceExclusiveCurrent, ensureMetersOk, verifyState, demoFx;
-
-log = { arg messageString; ("[BRINGUP] " ++ messageString).postln };
-
-step = { arg seconds, fn;
-    AppClock.sched(seconds, { fn.value; nil })
-};
-
-// --- timings (seconds) ---
-delayA = (
-    boot:     0.00,
-    sinks:    0.40,
-    guiMpb:   0.55,
-    source:   0.75,
-    current:  0.95,
-    meters:   1.15,
-    verify:   1.35,
-    demo:     1.75
-);
-
-// 1) Boot audio (safe to call repeatedly)
-doBoot = {
-    log.("boot audio");
-    Server.default.boot;
-};
-
-// 2) Robust sinks + AR buses (ensures sinks actually consume \in)
-ensureSinks = {
-    log.("ensure sinks are robust and audio‑rate");
-    Server.default.bind({
-        Ndef(\chainA, { \in.ar(2) });
-        Ndef(\chainB, { \in.ar(2) });
-        Ndef(\chainA).ar(2);
-        Ndef(\chainB).ar(2);
-    });
-};
-
-// 3) Ensure GUI + MPB (reuse if present)
-ensureGuiMpb = {
-    log.("ensure GUI + pedalboard");
-    ~gui = ~gui ?? { MagicDisplayGUI.new };
-    ~mpb = ~mpb ?? { MagicPedalboardNew.new(~gui) };
-};
-
-// 4) Musical internal source + AR (guaranteed audible)
-ensureSource = {
-    log.("define \\testmelody source (stereo)");
-    Server.default.bind({
-        Ndef(\testmelody, {
-            var trig, seq, f, env, tone, panPos;
-            trig = Impulse.kr(3.2);
-            seq  = Dseq([220, 277.18, 329.63, 392, 329.63, 277.18, 246.94], inf);
-            f    = Demand.kr(trig, 0, seq);
-            env  = Decay2.kr(trig, 0.01, 0.35);
-            tone = SinOsc.ar(f) * env * 0.25;
-            panPos = ToggleFF.kr(trig).linlin(0, 1, -0.6, 0.6);
-            Pan2.ar(tone, panPos)
-        });
-        Ndef(\testmelody).ar(2);
-    });
-};
-
-// 5) CURRENT <- testmelody; play CURRENT; stop NEXT
-enforceExclusiveCurrent = {
-    log.("set CURRENT source and enforce exclusive playback");
-    ~mpb.setSourceCurrent(\testmelody);
-    ~mpb.playCurrent;
-    Server.default.bind({
-        if(Ndef(\chainB).isPlaying) { Ndef(\chainB).stop };
-        if(Ndef(\chainA).isPlaying.not) { Ndef(\chainA).play(numChannels: 2) };
-    });
-};
-
-// 6) Retarget meters after sinks are definitely AR
-ensureMetersOk = {
-    if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) {
-        log.("retarget meters (off -> on)");
-        ~gui.enableMeters(false);
-        ~gui.enableMeters(true);
-    }{
-        log.("no GUI or enableMeters missing; skipping meter retarget");
-    };
-};
-
-// 7) Verify state (posts chain details and playing flags)
-verifyState = {
-    log.("verify state");
-    ~mpb.printChains;
-    AppClock.sched(0.15, {
-        var aPlaying, bPlaying, line;
-        aPlaying = Ndef(\chainA).isPlaying;
-        bPlaying = Ndef(\chainB).isPlaying;
-        line = "[PLAY] A=%  B=%".format(aPlaying, bPlaying);
-        line.postln;
-        nil
-    });
-};
-
-// 8) Demo FX: ensure \delay exists, add to NEXT, switch with short xfade
-demoFx = {
-    log.("demo FX: add \\delay to NEXT, then switch (0.12s)");
-    Server.default.bind({
-        Ndef(\delay, { |time=0.45, fb=0.35, mix=0.5|
-            var sig = \in.ar(2);
-            var delayed = CombC.ar(sig, 2.0, time.clip(0.01, 2.0), time * (fb.clip(0,0.95) * 6 + 0.1));
-            XFade2.ar(sig, delayed, (mix.clip(0,1) * 2 - 1))
-        });
-        Ndef(\delay).ar(2);
-    });
-    ~mpb.add(\delay);        // add to NEXT
-    ~mpb.switchChain(0.12);  // crossfade to hear delay
-    ~mpb.printChains;
-};
-
-// --- schedule the steps (no server.sync; UI remains responsive) ---
-log.("starting bring‑up sequence");
-step.(delayA[\boot],    { doBoot.value });
-step.(delayA[\sinks],   { ensureSinks.value });
-step.(delayA[\guiMpb],  { ensureGuiMpb.value });
-step.(delayA[\source],  { ensureSource.value });
-step.(delayA[\current], { enforceExclusiveCurrent.value });
-step.(delayA[\meters],  { ensureMetersOk.value });
-step.(delayA[\verify],  { verifyState.value });
-step.(delayA[\demo],    { demoFx.value });
-
-)
-// Probe_Ndef_SinkState.scd
-// v0.1
-// MD 20250916-1700
-
-//
-// Purpose: Safely inspect a sink Ndef’s current source object and playing/paused/monitor status.
-//          Uses .source (not .sourceCode) and prints class + optional asCompileString if available.
-// Style:   tilde vars, var-first, lowercase names, no server.sync, Server.default.bind for server ops.
-
-(
-var key, nx, srcObj, srcClass, srcCode, mon, playing, paused;
-
-key = \chainA; // change to \chainA if you want to probe A
-
-nx       = Ndef(key);
-srcObj   = nx.source;                 // current source object (Function or other)
-srcClass = srcObj.class;
-srcCode  = srcObj.tryPerform(\asCompileString); // may be nil if not supported
-mon      = nx.monitor;                // monitor object (if any)
-playing  = nx.isPlaying;
-paused   = nx.paused ? false;         // NodeProxy sometimes keeps paused flag internally
-
-("[PROBE] key=%  class=%  playing=%  paused=%  hasMonitor=%"
-    .format(key, srcClass, playing, paused, mon.notNil)).postln;
-
-if(srcCode.notNil) {
-    "[PROBE] source asCompileString:".postln;
-    srcCode.postln;
-} {
-    "[PROBE] source does not implement asCompileString; printing .source:".postln;
-    srcObj.postln;
-};
-)
 // acceptanceStepsTest.scd
 // v0.1
 // MD 20250916
@@ -1855,6 +1684,119 @@ define.(\drive, {
 // Ensure a basic set now (optional; you can call ensureFromChain later)
 ~procLib.ensureMany(~procLib.keys, 2);
 )
+// MagicStart_Prelude_SelfRun
+// v0.4.9
+// 2025-09-17 14:48 BST (MD)
+//
+// Purpose:
+// - Self-running top-of-file prelude to start from a known-good state.
+// - Avoid quit/boot races by reusing a healthy server + init tree + clear default group.
+// - Define busMeterA / busMeterB with a COMPILE-TIME channel count to prevent In.ar errors.
+// - Mix meters to mono internally to avoid language-level max comparisons on UGens.
+// Style:
+// - tilde vars only, var-first inside functions, no server.sync,
+//   Server.default.bind for server ops, GUI-safe (AppClock), your SC coding rules respected.
+
+(
+var numChannelsConst;
+
+// --- Decide a compile-time channel count for the meter synths ----------------
+// If you already set ~defaultNumChannels elsewhere (Integer > 0), we use it; otherwise fall back to 2.
+numChannelsConst = (
+    ~defaultNumChannels.isKindOf(Integer) and: { ~defaultNumChannels > 0 }
+).if({ ~defaultNumChannels }, { 2 });
+
+// --- Helpers -----------------------------------------------------------------
+~closeMagicDisplayGUIWindows = {
+    var windows;
+    windows = Window.allWindows.select { |w|
+        var name;
+        name = w.tryPerform(\name);
+        name.notNil and: { name.asString.beginsWith("MagicDisplayGUI") }
+    };
+    windows.do { |w| w.close };
+    "[START] closed any existing MagicDisplayGUI windows".postln;
+};
+
+~ensureServerReady = {
+    var s;
+    s = Server.default;
+
+    if (s.serverRunning) {
+        "[START] server already running → reusing".postln;
+    } {
+        if (s.booting) {
+            "[START] server already booting → waiting…".postln;
+        } {
+            "[START] booting server…".postln;
+            s.boot;
+        };
+        s.waitForBoot;
+    };
+
+    Server.default.bind({
+        s.initTree;
+        s.defaultGroup.freeAll;
+    });
+    "[START] tree inited + default group cleared".postln;
+};
+
+~ensureMeterDefs = {
+    var needA, needB;
+    needA = SynthDescLib.global.at(\busMeterA).isNil;
+    needB = SynthDescLib.global.at(\busMeterB).isNil;
+
+    if (needA or: { needB }) {
+        ("[START] (re)defining meter synths with numChannelsConst=" ++ numChannelsConst).postln;
+
+        // Capture numChannelsConst at SynthDef build time (literal inside the UGen graph).
+        Server.default.bind({
+            SynthDef(\busMeterA, { |bus = -1, in = 0, rate = 15, attack = 0.01, release = 0.3|
+                var useBus, sig, mono, trig, rms, peak;
+                // choose an index: \bus if >=0 else \in (control-rate comparator is fine for Select)
+                useBus = Select.kr(bus >= 0, [in, bus]);
+                // read exactly numChannelsConst channels (compile-time integer)
+                sig    = In.ar(useBus, numChannelsConst);
+                // mix to mono to avoid language-level max across arrays of UGens
+                mono   = Mix(sig);
+                // meters
+                rms    = Amplitude.kr(mono, attack, release);
+                peak   = PeakFollower.kr(mono, release);
+                trig   = Impulse.kr(rate);
+                SendReply.kr(trig, "/meterA", [rms, peak]);
+            }).add;
+
+            SynthDef(\busMeterB, { |bus = -1, in = 0, rate = 15, attack = 0.01, release = 0.3|
+                var useBus, sig, mono, trig, rms, peak;
+                useBus = Select.kr(bus >= 0, [in, bus]);
+                sig    = In.ar(useBus, numChannelsConst);
+                mono   = Mix(sig);
+                rms    = Amplitude.kr(mono, attack, release);
+                peak   = PeakFollower.kr(mono, release);
+                trig   = Impulse.kr(rate);
+                SendReply.kr(trig, "/meterB", [rms, peak]);
+            }).add;
+        });
+    };
+};
+
+// Optional: quick chain channel sanity check (posted if chains already exist)
+~checkChainChannels = {
+    var a, b;
+    a = Ndef(\chainA).tryPerform(\numChannels);
+    b = Ndef(\chainB).tryPerform(\numChannels);
+    if(a.notNil or: { b.notNil }) {
+        "[CHECK] Ndef chain channels → A:% , B:%".format(a, b).postln;
+    };
+};
+
+// --- Execute preflight now (self-running) ------------------------------------
+~closeMagicDisplayGUIWindows.value;
+~ensureServerReady.value;
+~ensureMeterDefs.value;
+~checkChainChannels.value;   // harmless if chains don't exist yet
+"[READY] MagicStart prelude complete — continue with your runner code below.".postln;
+)
 // Manage_MagicDisplayGUI_Singleton.scd
 // v0.1
 // MD 20250917-1230
@@ -2770,6 +2712,39 @@ ensureSource = {
 ~pedalboard.playCurrent;
 ~pedalboard.printChains;
 )
+// Probe_Ndef_SinkState.scd
+// v0.1
+// MD 20250916-1700
+
+//
+// Purpose: Safely inspect a sink Ndef’s current source object and playing/paused/monitor status.
+//          Uses .source (not .sourceCode) and prints class + optional asCompileString if available.
+// Style:   tilde vars, var-first, lowercase names, no server.sync, Server.default.bind for server ops.
+
+(
+var key, nx, srcObj, srcClass, srcCode, mon, playing, paused;
+
+key = \chainA; // change to \chainA if you want to probe A
+
+nx       = Ndef(key);
+srcObj   = nx.source;                 // current source object (Function or other)
+srcClass = srcObj.class;
+srcCode  = srcObj.tryPerform(\asCompileString); // may be nil if not supported
+mon      = nx.monitor;                // monitor object (if any)
+playing  = nx.isPlaying;
+paused   = nx.paused ? false;         // NodeProxy sometimes keeps paused flag internally
+
+("[PROBE] key=%  class=%  playing=%  paused=%  hasMonitor=%"
+    .format(key, srcClass, playing, paused, mon.notNil)).postln;
+
+if(srcCode.notNil) {
+    "[PROBE] source asCompileString:".postln;
+    srcCode.postln;
+} {
+    "[PROBE] source does not implement asCompileString; printing .source:".postln;
+    srcObj.postln;
+};
+)
 // quick_start_audible.scd
 // v0.1
 
@@ -3425,125 +3400,310 @@ jsonPath.postln;
 
 ) // end block
 // StartHere_CleanBoot_OneWindow_BringUp.scd
-// v0.5
-// MD 20250917-1346
+// v0.5.8
+// MD 20250917-1616
 //
-// Purpose: From a fresh interpreter, produce one MagicDisplayGUI window,
-//          audible CURRENT (\testmelody), NEXT silent (Option A), meters on,
-//          and verify A=true B=false.
-// Style: tilde vars, var-first, lowercase names; no server.sync;
-//        server ops inside Server.default.bind; GUI via AppClock.
+// Purpose:
+//   Known-state bring-up with one MagicDisplayGUI window, CURRENT=\testmelody
+//   audible, NEXT silent (Option A), meters on, and verify A=true B=false.
+//   Handles the case where GUI/MPB init quits and reboots the server mid-sequence
+//   by detecting the reboot, waiting for it, and re-publishing the graph afterward.
+//
+// Style:
+//   - tilde vars only
+//   - var-first in every block
+//   - lowercase names
+//   - no server.sync
+//   - server ops inside Server.default.bind
+//   - GUI via AppClock (single window named “MagicDisplayGUI…”)
 
 (
-var log, s, schedule, closeGuiWindows, bootIfNeededThen, buildAudio, makeGuiAndMpb, baseline, metersOn, verify;
+var log, s, numChConst,
+    closeGuiWindows, freshBoot, ensureMeterDefs, checkChainChannels,
+    clearOldNdefs, buildAudio, makeGuiAndMpb,
+    waitForServerDownThenUp, baselinePlayWithRetry, metersOn, verify,
+    runSequence;
 
 log = { arg msg; ("[START] " ++ msg).postln };
 s   = Server.default;
-schedule = { arg dt=0.0, func; AppClock.sched(dt.max(0), { func.value; nil }) };
+
+// channel constant everywhere (respects your global default if set)
+numChConst = (
+    ~defaultNumChannels.isKindOf(Integer) and: { ~defaultNumChannels > 0 }
+).if({ ~defaultNumChannels }, { 2 });
 
 // 1) Close any MagicDisplayGUI windows (singleton)
 closeGuiWindows = {
-    schedule.(0.0, {
-        Window.allWindows
-            .select({ arg w; (w.name ? "").asString.beginsWith("MagicDisplayGUI") })
-            .do(_.close);
-        log.("closed any existing MagicDisplayGUI windows");
-    });
+    var wins;
+    wins = Window.allWindows
+        .select({ arg w; (w.name ? "").asString.beginsWith("MagicDisplayGUI") });
+    wins.do(_.close);
+    log.("closed any existing MagicDisplayGUI windows");
 };
 
-// 2) After server is booted, do the rest
-bootIfNeededThen = { arg afterBootFunc;
+// 2) Force a FRESH server (quit if running, then boot), then clean the tree
+freshBoot = {
+    var t0, timeout, keepWait;
+    timeout = 5.0;
+
     if(s.serverRunning) {
-        // Quit first to avoid stale state; boot shortly after
-        log.("server running → quitting");
+        log.("server running → quitting for clean boot");
         s.quit;
-        schedule.(0.6, { // small delay to let quit complete
-            log.("booting server…");
-            s.boot;
+        t0 = Main.elapsedTime;
+        keepWait = true;
+        while({ s.serverRunning and: { keepWait } }, {
+            0.05.wait;
+            if((Main.elapsedTime - t0) > timeout) {
+                "[WARN] timeout waiting for server to quit".postln;
+                keepWait = false;
+            };
         });
-    }{
-        log.("booting server…");
-        s.boot;
     };
-    // Everything below happens ONLY AFTER the boot completes:
-    s.waitForBoot({
-        log.("server booted");
-        s.initTree; s.defaultGroup.freeAll;
-        log.("tree inited + default group cleared");
-        afterBootFunc.value; // continue
+
+    log.("booting server…");
+    s.boot;
+    s.waitForBoot;
+
+    Server.default.bind({
+        s.initTree;
+        s.defaultGroup.freeAll;
+    });
+    log.("tree inited + default group cleared");
+};
+
+// 3) Ensure meter SynthDefs exist (compile-time channel count; mono mix inside)
+ensureMeterDefs = {
+    var needA, needB, n;
+    n = numChConst;
+    needA = SynthDescLib.global.at(\busMeterA).isNil;
+    needB = SynthDescLib.global.at(\busMeterB).isNil;
+
+    if(needA or: { needB }) {
+        ("[START] (re)defining meter synths with numChConst=" ++ n).postln;
+
+        Server.default.bind({
+            SynthDef(\busMeterA, { |bus = -1, in = 0, rate = 15, attack = 0.01, release = 0.3|
+                var useBus, sig, mono, trig, rms, peak;
+                useBus = Select.kr(bus >= 0, [in, bus]);  // prefer \bus if set; else \in
+                sig    = In.ar(useBus, n);                // compile-time literal
+                mono   = Mix(sig);                        // stable single-channel level
+                rms    = Amplitude.kr(mono, attack, release);
+                peak   = PeakFollower.kr(mono, release);
+                trig   = Impulse.kr(rate);
+                SendReply.kr(trig, "/meterA", [rms, peak]);
+            }).add;
+
+            SynthDef(\busMeterB, { |bus = -1, in = 0, rate = 15, attack = 0.01, release = 0.3|
+                var useBus, sig, mono, trig, rms, peak;
+                useBus = Select.kr(bus >= 0, [in, bus]);
+                sig    = In.ar(useBus, n);
+                mono   = Mix(sig);
+                rms    = Amplitude.kr(mono, attack, release);
+                peak   = PeakFollower.kr(mono, release);
+                trig   = Impulse.kr(rate);
+                SendReply.kr(trig, "/meterB", [rms, peak]);
+            }).add;
+        });
+    };
+};
+
+// 4) Optional: print A/B channel counts if chains already exist
+checkChainChannels = {
+    var a, b;
+    a = Ndef(\chainA).tryPerform(\numChannels);
+    b = Ndef(\chainB).tryPerform(\numChannels);
+    if(a.notNil or: { b.notNil }) {
+        "[CHECK] Ndef chain channels → A:% , B:%".format(a, b).postln;
+    };
+};
+
+// 5) Clear any previous proxies to avoid channel wrapping warnings
+clearOldNdefs = {
+    Server.default.bind({
+        if(Ndef(\chainA).notNil) { Ndef(\chainA).clear(0) };
+        if(Ndef(\chainB).notNil) { Ndef(\chainB).clear(0) };
+        if(Ndef(\ts0).notNil)    { Ndef(\ts0).clear(0) };
+        if(Ndef(\testmelody).notNil) { Ndef(\testmelody).clear(0) };
     });
 };
 
-// 3) Build sinks and sources (server operations)
+// 6) Build sinks and sources (server ops)
 buildAudio = {
     Server.default.bind({
-        // Sinks: robust stereo consumers
-        Ndef(\chainA, { \in.ar(2) }); Ndef(\chainA).ar(2);
-        Ndef(\chainB, { \in.ar(2) }); Ndef(\chainB).ar(2);
+        // Sinks: read \in.ar(defaultNumChannels)
+        Ndef(\chainA, { \in.ar(numChConst) }); Ndef(\chainA).ar(numChConst);
+        Ndef(\chainB, { \in.ar(numChConst) }); Ndef(\chainB).ar(numChConst);
 
         // Sources: NEXT-safe silent + generated test melody
-        Ndef(\ts0, { Silent.ar(2) }); Ndef(\ts0).ar(2);
+        Ndef(\ts0, { Silent.ar(numChConst) }); Ndef(\ts0).ar(numChConst);
+
         Ndef(\testmelody, {
-            var trig = Impulse.kr(3.2);
-            var seq  = Dseq([220, 277.18, 329.63, 392, 329.63, 277.18, 246.94], inf);
-            var f    = Demand.kr(trig, 0, seq);
-            var env  = Decay2.kr(trig, 0.01, 0.35);
-            var tone = SinOsc.ar(f) * env * 0.25;
-            var pan  = ToggleFF.kr(trig).linlin(0, 1, -0.6, 0.6);
+            var trig, seq, f, env, tone, pan;
+            trig = Impulse.kr(3.2);
+            seq  = Dseq([220, 277.18, 329.63, 392, 329.63, 277.18, 246.94], inf);
+            f    = Demand.kr(trig, 0, seq);
+            env  = Decay2.kr(trig, 0.01, 0.35);
+            tone = SinOsc.ar(f) * env * 0.25;
+            pan  = ToggleFF.kr(trig).linlin(0, 1, -0.6, 0.6);
             Pan2.ar(tone, pan)
-        }); Ndef(\testmelody).ar(2);
+        });
+        Ndef(\testmelody).ar(numChConst);
     });
     log.("sinks + sources defined");
 };
 
-// 4) Create GUI + MPB (meters OFF initially)
+// 7) Create GUI + MPB (meters OFF initially). (We call this inside AppClock Routine)
 makeGuiAndMpb = {
-    schedule.(0.0, {
-        ~gui = MagicDisplayGUI.new;
-        ~mpb = MagicPedalboardNew.new(~gui);
-        if(~gui.respondsTo(\enableMeters)) { ~gui.enableMeters(false) };
-        // Alias for adapter scripts
-        if(~pedalboard.isNil and: { ~mpb.notNil }) { ~pedalboard = ~mpb };
-        log.("GUI + MPB created (meters off)");
-    });
+    ~gui = MagicDisplayGUI.new;
+    ~mpb = MagicPedalboardNew.new(~gui);
+    if(~gui.respondsTo(\enableMeters)) { ~gui.enableMeters(false) };
+    if(~pedalboard.isNil and: { ~mpb.notNil }) { ~pedalboard = ~mpb };
+    log.("GUI + MPB created (meters off)");
 };
 
-// 5) Baseline: CURRENT <- \testmelody; play; enforce Option A (NEXT silent)
-baseline = {
-    schedule.(0.10, {
+// 8) Detect a **server restart** after MPB creation; wait for it and re-publish graph
+waitForServerDownThenUp = {
+    var sawDown, t0, timeout, bootKickSent, stableCount, stableNeeded;
+    sawDown = false;
+    t0 = Main.elapsedTime;
+    timeout = 10.0;
+    bootKickSent = false;
+    stableCount = 0;
+    stableNeeded = 5; // 5 * 0.2s = 1.0s of stable running
+
+    // Observe the server for up to 10 seconds; if it goes down, wait until it comes back
+    while({
+        (Main.elapsedTime - t0) < timeout and: { stableCount < stableNeeded }
+    }, {
+        0.20.wait;
+
+        if(s.serverRunning.not) {
+            sawDown = true;
+            stableCount = 0;
+
+            // If it doesn't auto-boot within ~1s, kick a boot
+            if((Main.elapsedTime - t0) > 1.0 and: { bootKickSent.not }) {
+                "WARNING: server not running → booting server…".postln;
+                s.boot;
+                bootKickSent = true;
+            };
+        }{
+            // server is running now
+            stableCount = stableCount + 1;
+        };
+    });
+
+    if(sawDown) {
+        // If it was down during the window, make sure it's fully up
+        if(s.serverRunning.not) {
+            "WARNING: waiting for server to come up…".postln;
+            s.boot;  // safe to call even if already booting
+            s.waitForBoot;
+        }{
+            // give it a tiny settle and request notifications (optional but nice)
+            0.20.wait;
+            s.notify;
+        };
+
+        // Re-publish meter defs and audio graph after the reboot
+        ensureMeterDefs.value;
+        clearOldNdefs.value;
+        buildAudio.value;
+
+        // Give MPB a chance to rebuild its server tree if it does so lazily
+        0.20.wait;
+        if(~mpb.respondsTo(\rebuild)) { ~mpb.rebuild(\current) };
+        0.20.wait;
+    };
+};
+
+// 9) Baseline + robust play with retry (ensures MPB has built server groups)
+baselinePlayWithRetry = {
+    var attempts, ok;
+    attempts = 0;
+    ok = false;
+
+    while({ (attempts < 4) and: { ok.not } }, {
         ~mpb.setSourceCurrent(\testmelody);
         ~mpb.playCurrent;
-        ~mpb.enforceExclusiveCurrentOptionA(0.1);  // NEXT silenced at source
-        log.("baseline set: CURRENT=\\testmelody (Option A)");
+        ~mpb.enforceExclusiveCurrentOptionA(0.1);  // NEXT silenced at source (Option A)
+
+        0.30.wait; // allow bundles to land
+        ok = Ndef(\chainA).isPlaying;
+
+        attempts = attempts + 1;
+        if(ok) {
+            log.("baseline set: CURRENT=\\testmelody (Option A)");
+        }{
+            ("[RETRY] playCurrent attempt % failed; retrying…".format(attempts)).postln;
+            if(~mpb.respondsTo(\rebuild)) { ~mpb.rebuild(\current) };
+            0.30.wait;
+        };
     });
+
+    if(ok.not) {
+        "[WARN] playCurrent did not report Ndef(\\chainA).isPlaying=true after retries".postln;
+    };
 };
 
-// 6) Meters ON after everything is stable
+// 10) Meters ON (ensure defs just-in-time)
 metersOn = {
-    schedule.(0.20, {
-        if(~gui.respondsTo(\enableMeters)) { ~gui.enableMeters(true) };
-        log.("meters enabled");
-    });
+    ensureMeterDefs.value; // idempotent safety
+    if(~gui.respondsTo(\enableMeters)) { ~gui.enableMeters(true) };
+    log.("meters enabled");
 };
 
-// 7) Verify final state
+// 11) Verify final state
 verify = {
-    schedule.(0.30, {
-        ~mpb.printChains;
-        ("[PLAY] A=% B=%"
-            .format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
-    });
+    ~mpb.printChains;
+    ("[PLAY] A=% B=%"
+        .format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
+    checkChainChannels.value;
 };
 
-// --- Execute clean sequence ---
-closeGuiWindows.value;
-bootIfNeededThen.value({
-    buildAudio.value;
-    makeGuiAndMpb.value;
-    baseline.value;
-    metersOn.value;
-    verify.value;
-});
+// --- Execute clean sequence in one AppClock Routine --------------------------
+runSequence = {
+    var waitPreGUI, waitAfterMPB;
+    waitPreGUI  = 0.05; // small settle between bundles
+    waitAfterMPB = 0.15; // short window for GUI-created side effects
+
+    Routine({
+        // 0) Hygiene
+        closeGuiWindows.value;
+
+        // 1) Fresh boot + clean tree
+        freshBoot.value;
+
+        // 2) Predefine meter SynthDefs post-boot (safe re-add)
+        ensureMeterDefs.value;
+
+        // 3) Start clean, then build audio graph
+        clearOldNdefs.value;
+        buildAudio.value;
+
+        // 4) Create GUI + MPB (this may quit the server in its init)
+        waitPreGUI.wait;
+        makeGuiAndMpb.value;
+
+        // 5) Watch for server going down and coming back; then re-publish defs/graph
+        waitAfterMPB.wait;    // allow immediate /quit to show up
+        waitForServerDownThenUp.value;
+
+        // 6) Baseline + robust play
+        baselinePlayWithRetry.value;
+
+        // 7) Turn meters on
+        0.25.wait;
+        metersOn.value;
+
+        // 8) Verify
+        0.20.wait;
+        verify.value;
+    }).play(AppClock);
+};
+
+// Kick off the sequence
+runSequence.value;
 )
 // Strict_Reset_To_Exclusive_Audible.scd
 // v0.1

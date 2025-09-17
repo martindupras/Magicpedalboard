@@ -1,4 +1,4 @@
-/* MagicDisplay.sc  v0.1.2
+/* MagicDisplay.sc  v0.1.3
    Console display adaptor for MagicPedalboardNew.
    Prints structured messages now; later you can subclass with a real GUI.
    // MD 20250912-1345
@@ -6,14 +6,23 @@
 
 MagicDisplay : Object {
 
-    classvar < version;
+    classvar < version, < metersReady, < meterChannels;
 
     var < logLevel;  // 0 = silent, 1 = normal, 2 = verbose
 
-    *initClass {
-        version = "v0.1.2";
-        ("MagicDisplay " ++ version).postln;
-    }
+
+*initClass {
+    version = "v0.1.3";
+    ("MagicDisplay " ++ version).postln;
+
+    // default compile-time meter channel count
+    meterChannels = 2;
+    metersReady = false;
+
+    // define (or re-define) the meter SynthDefs now
+    this.ensureMeterDefs(meterChannels);
+}
+
 
     *new { |level = 1|
         ^super.new.init(level)
@@ -131,4 +140,37 @@ MagicDisplay : Object {
     showError { |message|
         ("[MPB:error] " ++ message).warn;
     }
+
+	// ----- meter SynthDefs (class-level) -----
+
+*ensureMeterDefs { arg ch = 2;
+    var n;
+    // clamp to a sensible positive integer
+    n = ch.asInteger.max(1);
+    meterChannels = n;
+
+    // Define (or re-define) once per class init (safe to call again after recompile).
+    // Uses compile-time channel count 'n' inside the UGen graph.
+    Server.default.bind({
+        SynthDef(\busMeterA, { arg inBus, rate = 15;
+            var sig  = In.ar(inBus, n);                 // compile-time 'n'
+            var amp  = Amplitude.ar(sig).clip(0, 1);    // per-channel amplitude
+            SendReply.kr(Impulse.kr(rate), '/ampA', A2K.kr(amp));
+        }).add;
+
+        SynthDef(\busMeterB, { arg inBus, rate = 15;
+            var sig  = In.ar(inBus, n);
+            var amp  = Amplitude.ar(sig).clip(0, 1);
+            SendReply.kr(Impulse.kr(rate), '/ampB', A2K.kr(amp));
+        }).add;
+    });
+
+    metersReady = true;
+}
+
+*setMeterChannels { arg ch = 2;
+    // convenience: re-emit defs with a new compile-time channel count
+    this.ensureMeterDefs(ch);
+}
+
 }
