@@ -1,19 +1,18 @@
 // OneShot_BringUp_MagicPedalboardNew_GUI_Meters.scd
-// v0.2
-// MD 20250917-1147
+// v0.2.1
+// MD 20250917-1208
 //
-// Purpose: Deterministic bring-up to audible + exclusive baseline (CURRENT audible, NEXT silent).
-//          Disables meters early, ensures stereo sinks (\in.ar(2)), defines \ts0 (stereo Silent)
-//          and \testmelody, plays CURRENT, enforces Option A, then enables meters + verifies.
+// Purpose: Deterministic bring-up: disable meters early; stereo sinks (\in.ar(2)); \ts0 stereo Silent;
+//          define \testmelody; play CURRENT; enforce Option A; then explicitly pause NEXT so
+//          isPlaying=B=false; enable meters; verify A XOR B.
 // Style: tilde vars, var-first, lowercase names, no server.sync,
 //        server ops inside Server.default.bind. GUI on AppClock only; one window.
 
 (
 var log, step, t,
     doBoot, ensureGuiMpb_disableMetersEarly, ensureSinksStereo, ensureTs0SilentStereo,
-    ensureTestMelody, startCurrent_enforceExclusive, enableMetersClean, verifyState;
+    ensureTestMelody, startCurrent_enforceExclusive, forceNextPauseFlag, enableMetersClean, verifyState;
 
-// --- helpers ---
 log  = { arg s; ("[BRINGUP] " ++ s).postln };
 step = { arg sec, fn; AppClock.sched(sec, { fn.value; nil }) };
 
@@ -25,6 +24,7 @@ t = (
     ts0:      0.65,
     source:   0.80,
     current:  1.00,
+    nextPause:1.05,   // tiny step after Option A
     meters:   1.20,
     verify:   1.40
 );
@@ -36,12 +36,12 @@ doBoot = {
 
 ensureGuiMpb_disableMetersEarly = {
     log.("ensure GUI + pedalboard; disable meters early");
-    ~gui = ~gui ?? { MagicDisplayGUI.new };         // builds window on AppClock
-    // proactively disable meters twice (beats any queued auto-enable)
+    ~gui = ~gui ?? { MagicDisplayGUI.new };
+    // proactively disable meters twice (beats any queued enable)
     AppClock.sched(0.00, { ~gui.enableMeters(false); nil });
     AppClock.sched(0.05, { ~gui.enableMeters(false); nil });
 
-    ~mpb = ~mpb ?? { MagicPedalboardNew.new(~gui) }; // class v0.4.5 with Option A helper
+    ~mpb = ~mpb ?? { MagicPedalboardNew.new(~gui) };
 };
 
 ensureSinksStereo = {
@@ -78,8 +78,16 @@ ensureTestMelody = {
 startCurrent_enforceExclusive = {
     log.("CURRENT <- \\testmelody; play + enforce Option A");
     ~mpb.setSourceCurrent(\testmelody);
-    ~mpb.playCurrent;                         // MPB already enforces Option A post-play
-    ~mpb.enforceExclusiveCurrentOptionA(0.1); // belt-and-braces: NEXT hard-silenced + stop monitor
+    ~mpb.playCurrent;                         // MPB enforces Option A after play
+    ~mpb.enforceExclusiveCurrentOptionA(0.1); // belt-and-braces: NEXT hard-silenced + stop
+};
+
+forceNextPauseFlag = {
+    // Ensure NEXT.isPlaying == false (state aligns with Option A audio silence)
+    var nextSink;
+    nextSink = ~mpb.nextChain[0];             // sink symbol (chainB if A is current)
+    Server.default.bind({ Ndef(nextSink).pause });
+    log.("NEXT paused (flag B=false)");
 };
 
 enableMetersClean = {
@@ -101,12 +109,13 @@ verifyState = {
 };
 
 log.("start deterministic bring-up");
-step.(t[\boot],    { doBoot.value });
-step.(t[\guiMpb],  { ensureGuiMpb_disableMetersEarly.value });
-step.(t[\sinks],   { ensureSinksStereo.value });
-step.(t[\ts0],     { ensureTs0SilentStereo.value });
-step.(t[\source],  { ensureTestMelody.value });
-step.(t[\current], { startCurrent_enforceExclusive.value });
-step.(t[\meters],  { enableMetersClean.value });
-step.(t[\verify],  { verifyState.value });
+step.(t[\boot],     { doBoot.value });
+step.(t[\guiMpb],   { ensureGuiMpb_disableMetersEarly.value });
+step.(t[\sinks],    { ensureSinksStereo.value });
+step.(t[\ts0],      { ensureTs0SilentStereo.value });
+step.(t[\source],   { ensureTestMelody.value });
+step.(t[\current],  { startCurrent_enforceExclusive.value });
+step.(t[\nextPause],{ forceNextPauseFlag.value });   // <-- NEW tiny step
+step.(t[\meters],   { enableMetersClean.value });
+step.(t[\verify],   { verifyState.value });
 )
