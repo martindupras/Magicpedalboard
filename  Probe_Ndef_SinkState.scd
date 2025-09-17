@@ -10,7 +10,7 @@
 (
 var key, nx, srcObj, srcClass, srcCode, mon, playing, paused;
 
-key = \chainB; // change to \chainA if you want to probe A
+key = \chainA; // change to \chainA if you want to probe A
 
 nx       = Ndef(key);
 srcObj   = nx.source;                 // current source object (Function or other)

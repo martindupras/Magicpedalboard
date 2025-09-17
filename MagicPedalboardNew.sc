@@ -1,4 +1,4 @@
-/* MagicPedalboardNew.sc v0.4.5
+/* MagicPedalboardNew.sc v0.4.6
  A/B pedalboard chain manager built on Ndefs.
 
  - Chains are Arrays of Symbols ordered [sink, …, source].
@@ -32,7 +32,7 @@ MagicPedalboardNew : Object {
 
 	*initClass {
 		var text;
-		version = "v0.4.5";
+		version = "v0.4.6";
 		text = "MagicPedalboardNew " ++ version;
 		text.postln;
 	}
@@ -512,8 +512,44 @@ MagicPedalboardNew : Object {
 		^serverIsRunning
 	}
 
+//
+// v0.4.6 change
 
-	enforceExclusiveCurrentOptionA { arg fadeCurrent = 0.1;
+
+enforceExclusiveCurrentOptionA { arg fadeCurrent = 0.1;
+    var currentSink, nextSink, chans, fadeCur;
+    currentSink = currentChain[0];
+    nextSink    = nextChain[0];
+    chans       = defaultNumChannels;
+    fadeCur     = fadeCurrent.clip(0.05, 0.2);
+
+    Server.default.bind({
+        // CURRENT: robust \in.ar, stereo shape pinned, playing
+        Ndef(currentSink, { \in.ar(chans) });
+        Ndef(currentSink).mold(chans, \audio);   // authoritative shape
+        Ndef(currentSink).fadeTime_(fadeCur);
+        if(Ndef(currentSink).isPlaying.not) {
+            Ndef(currentSink).play(numChannels: chans);
+        };
+
+        // NEXT: hard-silence + ensure flag drops
+        // 1) silence source, then .stop (no audio either way)
+        Ndef(nextSink, { Silent.ar(chans) });
+        Ndef(nextSink).mold(chans, \audio);
+        Ndef(nextSink).fadeTime_(0.01);
+        Ndef(nextSink).stop;
+
+        // 2) drop monitor/flag deterministically, then re-establish silent sink
+        Ndef(nextSink).end;                      // frees inner players, "stop listen" (NodeProxy help)
+        Ndef(nextSink, { Silent.ar(chans) });    // keep NEXT present & silent for prebuild
+        Ndef(nextSink).mold(chans, \audio);
+        // do NOT play NEXT
+    });
+
+    ^this
+}
+
+/*	enforceExclusiveCurrentOptionA { arg fadeCurrent = 0.1;
 		var currentSink, nextSink, chans, fadeCur;
 		currentSink = currentChain[0];
 		nextSink = nextChain[0];
@@ -537,7 +573,7 @@ MagicPedalboardNew : Object {
 		});
 
 		^this
-	}
+	}*/
 
 
 	effectiveListForInternal { arg listRef;
