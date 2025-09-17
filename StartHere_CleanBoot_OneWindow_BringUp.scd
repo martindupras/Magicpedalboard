@@ -1,34 +1,25 @@
 // StartHere_CleanBoot_OneWindow_BringUp.scd
-// v0.3
-// MD 20250917-1253
+// v0.4
+// MD 20250917-1338
 //
-// Purpose: From a fresh interpreter, boot server safely, ensure exactly ONE
-//          MagicDisplayGUI window, create ~mpb, build robust stereo sinks,
-//          define sources (\testmelody, \ts0), set CURRENT to \testmelody,
-//          enforce Option A (NEXT silent), enable meters, verify A XOR B.
-// Style: tilde vars, var-first, lowercase names, no server.sync;
-//        server ops inside Server.default.bind; GUI via AppClock.
+// Purpose: Deterministic clean boot from a fresh (or messy) state:
+//          - Close any existing MagicDisplayGUI windows (singleton)
+//          - Quit server if running, then boot + wait for boot
+//          - Init class tree, clear default group
+//          - Build sinks (\\in.ar(2)) + sources (\\ts0 silent, \\testmelody)
+//          - Create GUI + MPB (meters off), set CURRENT=\\testmelody
+//          - Enforce Option A (NEXT silent), enable meters, verify A XOR B
+// Style: tilde vars, var-first, lowercase names, no server.sync,
+//        all server ops inside Server.default.bind; GUI via AppClock only.
 
 (
-var log, closeGuiWindows, bootServerClean, initGuiAndMpb,
-    ensureSinksStereo, ensureSources, setBaselineCurrent,
-    enforceOptionA, enableMeters, verify, s;
+var log, s, closeGuiWindows, waitForServerDown, waitForBootFlagged,
+    bootClean, buildAudio, makeGuiAndMpb, baseline, metersOn, verify;
 
-log = { arg s; ("[START] " ++ s).postln };
+log = { arg t; ("[START] " ++ t).postln };
+s = Server.default;
 
-// 0) (re)boot server safely and clear node tree
-bootServerClean = {
-    s = Server.default;
-    // If running, quit first to avoid stale state
-    if(s.serverRunning) { s.quit };
-    s.waitForBoot({
-        s.initTree;
-        s.defaultGroup.freeAll;
-        log.("server booted + tree inited + default group cleared");
-    });
-};
-
-// 1) close any existing MagicDisplayGUI windows (singleton)
+// Close any MagicDisplayGUI windows (singleton policy)
 closeGuiWindows = {
     AppClock.sched(0.0, {
         Window.allWindows
@@ -38,31 +29,46 @@ closeGuiWindows = {
     });
 };
 
-// 2) new GUI + MPB (tilde-vars)
-initGuiAndMpb = {
-    AppClock.sched(0.05, {
-        ~gui = MagicDisplayGUI.new;
-        ~mpb = MagicPedalboardNew.new(~gui);
-        // meters OFF initially (we'll re-enable later)
-        if(~gui.respondsTo(\enableMeters)) { ~gui.enableMeters(false) };
-        log.("GUI + MPB created (meters off)");
-        nil
-    });
+// Poll until server is fully down
+waitForServerDown = {
+    Routine({
+        while({ s.serverRunning }, { 0.05.wait });
+    })
 };
 
-// 3) robust stereo sinks: \in.ar(2) + ar(2)
-//    (required by your sink design; non-intrusive to class wiring)
-ensureSinksStereo = {
+// Boot and set a flag from s.waitForBoot
+waitForBootFlagged = {
+    var booted = false;
+    s.waitForBoot({
+        s.initTree;       // safe initialization
+        s.defaultGroup.freeAll;
+        booted = true;
+        log.("server booted + tree inited + default group cleared");
+    });
+    Routine({
+        while({ booted.not }, { 0.05.wait });
+    })
+};
+
+// Clean boot sequence (quit if running, then boot and wait)
+bootClean = {
+    Routine({
+        if(s.serverRunning) {
+            s.quit;
+            waitForServerDown.value.play(SystemClock).yield; // block routine until down
+        };
+        s.boot;
+        waitForBootFlagged.value.play(SystemClock).yield;    // block routine until booted
+    })
+};
+
+// Build sinks and sources (server ops)
+buildAudio = {
     Server.default.bind({
+        // Sinks: robust stereo consumers
         Ndef(\chainA, { \in.ar(2) }); Ndef(\chainA).ar(2);
         Ndef(\chainB, { \in.ar(2) }); Ndef(\chainB).ar(2);
-    });
-    log.("sinks ready: \\in.ar(2) + ar(2)");
-};
-
-// 4) define \ts0 (stereo Silent) + \testmelody (stereo generated audio)
-ensureSources = {
-    Server.default.bind({
+        // Sources
         Ndef(\ts0, { Silent.ar(2) }); Ndef(\ts0).ar(2);
         Ndef(\testmelody, {
             var trig = Impulse.kr(3.2);
@@ -74,33 +80,40 @@ ensureSources = {
             Pan2.ar(tone, pan)
         }); Ndef(\testmelody).ar(2);
     });
-    log.("sources ready: \\ts0 (silent), \\testmelody (stereo)");
+    log.("sinks + sources ready");
 };
 
-// 5) set CURRENT source and play (class-managed wiring uses <<> internally)
-setBaselineCurrent = {
+// GUI + MPB (meters off first)
+makeGuiAndMpb = {
+    AppClock.sched(0.0, {
+        ~gui = MagicDisplayGUI.new;
+        ~mpb = MagicPedalboardNew.new(~gui);
+        if(~gui.respondsTo(\enableMeters)) { ~gui.enableMeters(false) };
+        // Alias for adapter scripts that expect ~pedalboard
+        if(~pedalboard.isNil and: { ~mpb.notNil }) { ~pedalboard = ~mpb };
+        log.("GUI + MPB created (meters off)");
+        nil
+    });
+};
+
+// Set baseline: CURRENT <- \testmelody; play + Option A
+baseline = {
     ~mpb.setSourceCurrent(\testmelody);
     ~mpb.playCurrent;
-    log.("CURRENT <- \\testmelody; playing");
+    ~mpb.enforceExclusiveCurrentOptionA(0.1);  // NEXT silent at source
+    log.("baseline set (CURRENT=\\testmelody, Option A)");
 };
 
-// 6) enforce Option A (NEXT silent)
-//    (class implementation; no direct sink-source overwrites here)
-enforceOptionA = {
-    ~mpb.enforceExclusiveCurrentOptionA(0.1);
-    log.("Option A enforced (NEXT silent)");
-};
-
-// 7) meters ON (after sinks/sources are stable)
-enableMeters = {
-    AppClock.sched(0.10, {
+// Meters on (after everything stable)
+metersOn = {
+    AppClock.sched(0.05, {
         if(~gui.respondsTo(\enableMeters)) { ~gui.enableMeters(true) };
         log.("meters enabled");
         nil
     });
 };
 
-// 8) verify (print chains; A XOR B)
+// Verify A/B flags
 verify = {
     ~mpb.printChains;
     AppClock.sched(0.20, {
@@ -110,20 +123,25 @@ verify = {
     });
 };
 
-// --- run sequence deterministically ---
-closeGuiWindows.value;
-Server.default.boot;
-bootServerClean.value;               // waits for boot + inits tree + clears group
-initGuiAndMpb.value;
-AppClock.sched(0.20, {
-    ensureSinksStereo.value;
-    ensureSources.value;
-    setBaselineCurrent.value;
-    enforceOptionA.value;
-    enableMeters.value;
+// --- Run the whole sequence deterministically inside one Routine ---
+Routine({
+    // 1) GUI singleton
+    closeGuiWindows.value; 0.10.wait;
+
+    // 2) Clean boot (quit if needed, then boot + wait)
+    bootClean.value.play(SystemClock).yield;
+
+    // 3) Build audio graph on server
+    buildAudio.value;
+    0.05.wait;
+
+    // 4) GUI + MPB
+    makeGuiAndMpb.value;
+    0.15.wait;
+
+    // 5) Baseline + meters + verify
+    baseline.value;
+    metersOn.value;
     verify.value;
-    // make adapter scripts happy:
-    if(~pedalboard.isNil and: { ~mpb.notNil }) { ~pedalboard = ~mpb };
-    nil
-});
+}).play(SystemClock);
 )
