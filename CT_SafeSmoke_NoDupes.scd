@@ -69,6 +69,10 @@ ensureSource.();
 printChainsShort.();
 assertOnce.(~mpb.effectiveNext, \delay, "after /add/delay + /setSource/testmelody");
 
+
+//fix
+~ct_applyOSCPathToMPB.("/setSource/testmelody", ~mpb, ~gui);
+
 // 4) Switch once with a short fade; CURRENT should now include \delay and end with \testmelody
 ~mpb.switchChain(0.12);
 

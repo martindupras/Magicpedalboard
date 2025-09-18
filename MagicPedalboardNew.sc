@@ -411,6 +411,57 @@ this.startReadyPoll;
 		if(display.notNil) { display.showMutation(\setSourceCurrent, [key], currentChain) };
 	}
 
+
+
+setSourcesBoth { arg key;
+    var k, lastA, lastB, curWasA, nextWasA, newA, newB, sizeOk;
+
+    // pick a sensible key (today we want \testmelody)
+    k = key ? \testmelody;
+
+    // guard: require [sink, source] minimum on both chains
+    sizeOk = (chainAList.size >= 2) and: { chainBList.size >= 2 };
+    if(sizeOk.not) { ^this };
+
+    // remember which concrete list object was CURRENT/NEXT *before* we replace them
+    curWasA  = (currentChain === chainAList);
+    nextWasA = (nextChain    === chainAList);
+
+    // compute last indices
+    lastA = chainAList.size - 1;
+    lastB = chainBList.size - 1;
+
+    // replace the *source symbol* (last position) on both lists
+    newA = chainAList.copy; newA[lastA] = k;
+    newB = chainBList.copy; newB[lastB] = k;
+
+    // publish new lists and restore CURRENT/NEXT pointers to the matching list
+    chainAList = newA;
+    chainBList = newB;
+    currentChain = if(curWasA)  { chainAList } { chainBList };
+    nextChain    = if(nextWasA) { chainAList } { chainBList };
+
+    // rebuild both (non-destructive; uses <<> internally in rebuildUnbound)
+    this.rebuild(currentChain);
+    this.rebuild(nextChain);
+
+    // (optional) inform display
+    if(display.notNil and: { display.respondsTo(\showMutation) }) {
+        display.showMutation(\setSourcesBoth, [k], nextChain);
+    };
+
+    ^this
+}
+
+setDefaultSource { arg key;
+    var k;
+    // update the instance default; does not modify existing chains immediately
+    k = key ? \testmelody;
+    defaultSource = k;
+    ^this
+}
+
+
 	// ─── diagnostics helpers ──────────────────────────────────────
 	effectiveCurrent { ^this.effectiveListForInternal(currentChain) }
 	effectiveNext    { ^this.effectiveListForInternal(nextChain) }
