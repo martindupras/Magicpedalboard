@@ -239,6 +239,87 @@ Server.default.bind({
     Ndef(\delay).ar(2);
 });
 )
+// CT_SafeSmoke_NoDupes.scd
+// v0.1
+// MD 2025-09-18 10:16 BST
+//
+// Purpose:
+// - Safely test CommandTree adapter without duplicate insertions.
+// - Add exactly one \delay to NEXT, then switch once and verify audio.
+// Style:
+// - tilde vars; var-first; lowercase; no server.sync;
+// - server ops inside Server.default.bind only when creating/updating Ndefs.
+
+(
+var log, countKey, assertOnce, printChainsShort, ensureAdapterOnce, ensureSource;
+
+log = { arg s; ("[CT] " ++ s).postln };
+countKey = { arg array, key; var c=0; array.do({ arg k; if(k == key) { c = c + 1 } }); c };
+assertOnce = { arg list, key, label;
+    var n;
+    n = countKey.(list, key);
+    ("[ASSERT] " ++ label ++ " — '" ++ key.asString ++ "' count=" ++ n).postln;
+    if(n != 1) { ("[ASSERT] expected exactly 1; got " ++ n).warn };
+};
+printChainsShort = {
+    var cur = ~mpb.effectiveCurrent, nxt = ~mpb.effectiveNext;
+    ("[CHAINS] CURRENT=" ++ cur).postln;
+    ("[CHAINS] NEXT   =" ++ nxt).postln;
+};
+ensureAdapterOnce = {
+    if(~ct_applyOSCPathToMPB.isNil) {
+        "adapter_commandtree_to_magicpedalboard.scd".loadRelative;
+        log.("adapter loaded");
+    }{
+        log.("adapter already present");
+    };
+};
+ensureSource = {
+    // Make sure testmelody exists and is stereo; runner should have done this, but it's cheap
+    Server.default.bind({
+        if(Ndef(\testmelody).source.isNil) {
+            Ndef(\testmelody, {
+                var trig = Impulse.kr(3.2);
+                var seq = Dseq([220, 277.18, 329.63, 392, 329.63, 277.18, 246.94], inf);
+                var f = Demand.kr(trig, 0, seq);
+                var env = Decay2.kr(trig, 0.01, 0.35);
+                var tone = SinOsc.ar(f) * env * 0.25;
+                var pan = ToggleFF.kr(trig).linlin(0, 1, -0.6, 0.6);
+                Pan2.ar(tone, pan)
+            });
+        };
+        Ndef(\testmelody).ar(2);
+    });
+};
+
+// ---- run the safe smoke ----
+ensureAdapterOnce.();
+ensureSource.();
+
+// 0) Known baseline: CURRENT audible, NEXT silent (runner already enforces Option A)
+~mpb.printChains;
+
+// 1) CLEAN the NEXT chain before we add anything
+~mpb.clearChain;
+~mpb.printChains;
+
+// 2) Apply exactly one path "/add/delay" via adapter (no fallback tokens)
+~ct_applyOSCPathToMPB.("/add/delay", ~mpb, ~gui);
+
+// 3) Inspect NEXT; assert only one 'delay'
+printChainsShort.();
+assertOnce.(~mpb.effectiveNext, \delay, "after /add/delay");
+
+// 4) Switch once with a short fade; CURRENT should now include \delay
+~mpb.switchChain(0.12);
+
+// 5) Post-switch: ensure audio & exclusivity
+AppClock.sched(0.40, {
+    printChainsShort.();
+    ("[PLAY] A=% B=%".format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
+    nil
+});
+)
 // demo_apply_after_fix.scd
 // v0.1
 // MD 20250916-1031
@@ -494,7 +575,7 @@ Server.default.bind({
 ~pedalboard.printChains;   // posts and drives GUI detail view
 )
 // demo_commandtree_preformed_queues.scd
-// v0.1
+// v0.2
 // MD 20250916-1048
 
 (
@@ -522,13 +603,23 @@ enqueueTokensFromPath = { arg cm, pathString;
 
 // A small playlist of fully-formed queues, like the tree would send
 // (You can add "/commands/..." variants too; adapter strips the prefix.)
+
 playlist = [
+    "/setSource/testmelody",  // <— Ensure NEXT isn't Silent
     "/add/delay",
     "/switch",
     "/bypass/delay/on",
     "/bypass/delay/off",
     "/switch"
 ];
+
+/*playlist = [
+    "/add/delay",
+    "/switch",
+    "/bypass/delay/on",
+    "/bypass/delay/off",
+    "/switch"
+];*/
 
 indexCounter = 0; totalCount = playlist.size;
 
@@ -3400,7 +3491,7 @@ jsonPath.postln;
 
 ) // end block
 // StartHere_CleanBoot_OneWindow_BringUp.scd
-// v0.5.8
+// v0.6
 // MD 20250917-1616
 //
 // Purpose:
@@ -3422,7 +3513,7 @@ var log, s, numChConst,
     closeGuiWindows, freshBoot, ensureMeterDefs, checkChainChannels,
     clearOldNdefs, buildAudio, makeGuiAndMpb,
     waitForServerDownThenUp, baselinePlayWithRetry, metersOn, verify,
-    runSequence;
+    runSequence,waitOnMpbReady;
 
 log = { arg msg; ("[START] " ++ msg).postln };
 s   = Server.default;
@@ -3527,6 +3618,7 @@ clearOldNdefs = {
     });
 };
 
+
 // 6) Build sinks and sources (server ops)
 buildAudio = {
     Server.default.bind({
@@ -3617,6 +3709,7 @@ waitForServerDownThenUp = {
     };
 };
 
+
 // 9) Baseline + robust play with retry (ensures MPB has built server groups)
 baselinePlayWithRetry = {
     var attempts, ok;
@@ -3661,6 +3754,32 @@ verify = {
     checkChainChannels.value;
 };
 
+// 11b) Wait for MPB "ready" and then do meters + verify (no fixed sleeps)
+waitOnMpbReady = {
+    var onReady;  // var-first in outer function
+
+    onReady = {
+        var a, b;  // var-first in inner function/closure
+
+        // meters on only when sinks are AR and CURRENT is playing
+        if(~gui.respondsTo(\enableMeters)) { ~gui.enableMeters(true) };
+
+        ~mpb.printChains;
+
+        ("[PLAY] A=% B=%"
+            .format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
+
+        // channel sanity print
+        a = Ndef(\chainA).tryPerform(\numChannels);
+        b = Ndef(\chainB).tryPerform(\numChannels);
+        ("[CHECK] Ndef chain channels → A:% , B:%".format(a, b)).postln;
+    };
+
+    // use the new class helper; no sleeps here
+    ~mpb.waitUntilReady(2.5, 0.05, onReady);
+};
+
+
 // --- Execute clean sequence in one AppClock Routine --------------------------
 runSequence = {
     var waitPreGUI, waitAfterMPB;
@@ -3675,7 +3794,8 @@ runSequence = {
         freshBoot.value;
 
         // 2) Predefine meter SynthDefs post-boot (safe re-add)
-        ensureMeterDefs.value;
+        // ensureMeterDefs.value;
+		MagicDisplay.setMeterChannels(numChConst);
 
         // 3) Start clean, then build audio graph
         clearOldNdefs.value;
@@ -3688,17 +3808,11 @@ runSequence = {
         // 5) Watch for server going down and coming back; then re-publish defs/graph
         waitAfterMPB.wait;    // allow immediate /quit to show up
         waitForServerDownThenUp.value;
+// 6) Baseline + robust play (kept, since it launches CURRENT deterministically)
+baselinePlayWithRetry.value;
+// 7–8) Wait on a real MPB condition, then meters + verify (no fixed sleeps)
+waitOnMpbReady.value;
 
-        // 6) Baseline + robust play
-        baselinePlayWithRetry.value;
-
-        // 7) Turn meters on
-        0.25.wait;
-        metersOn.value;
-
-        // 8) Verify
-        0.20.wait;
-        verify.value;
     }).play(AppClock);
 };
 

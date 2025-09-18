@@ -11,7 +11,7 @@ define = { arg key, func; lib.register(key, func) };
 // Sources
 define.(\ts0, {
     var inputSignal;
-    inputSignal = SoundIn.ar((0..1));
+    inputSignal = Silent.ar((0..1));
     inputSignal * 1.0
 });
 

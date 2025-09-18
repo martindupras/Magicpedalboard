@@ -17,5 +17,5 @@ Server.default.bind({
     Ndef(\chainA).play;
 });
 
-log.("Manual patch: chainA <<>> toneTest; chainA.play — you should hear steady tone now.");
+log.("Manual patch: chainA <<> toneTest; chainA.play — you should hear steady tone now.");
 )

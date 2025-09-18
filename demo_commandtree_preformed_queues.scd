@@ -1,5 +1,5 @@
 // demo_commandtree_preformed_queues.scd
-// v0.1
+// v0.2
 // MD 20250916-1048
 
 (
@@ -27,13 +27,23 @@ enqueueTokensFromPath = { arg cm, pathString;
 
 // A small playlist of fully-formed queues, like the tree would send
 // (You can add "/commands/..." variants too; adapter strips the prefix.)
+
 playlist = [
+    "/setSource/testmelody",  // <— Ensure NEXT isn't Silent
     "/add/delay",
     "/switch",
     "/bypass/delay/on",
     "/bypass/delay/off",
     "/switch"
 ];
+
+/*playlist = [
+    "/add/delay",
+    "/switch",
+    "/bypass/delay/on",
+    "/bypass/delay/off",
+    "/switch"
+];*/
 
 indexCounter = 0; totalCount = playlist.size;
 
