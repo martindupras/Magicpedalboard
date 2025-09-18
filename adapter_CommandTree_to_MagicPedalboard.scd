@@ -1,8 +1,11 @@
 // adapter_commandtree_to_magicpedalboard.scd
-// v0.3
-// MD 20250916-1038
+// v0.3.1
+// MD 20250916-14:49
 
 (
+
+var alreadyWrapped;
+
 ~ct_knownVerbs = #[\add, \bypass, \removeAt, \swap, \clear, \setSource, \switch];
 ~ct_knownProcs = #[\delay, \chorus, \tremolo, \reverb, \drive, \transpose, \hex, \audio, \filters, \delays, \noise, \oscillators];
 ~ct_log = { arg messageString; ("[CT->MPB] " ++ messageString).postln };
@@ -104,4 +107,117 @@
 ~ct_sendAndApply = { arg commandManager, pedalboard, gui;
     ~ct_applyQueueToMPBFromCM.(commandManager, pedalboard, gui);
 };
+
+
+
+// 0) Capture the original adapter exactly once so we can delegate non-switch paths safely.
+alreadyWrapped = (~ct_applyOSCPathToMPB_raw.notNil);
+if(alreadyWrapped.not) {
+    ~ct_applyOSCPathToMPB_raw = ~ct_applyOSCPathToMPB;
+};
+
+// 1) Helper: guard NEXT tail before switch, then audit after fade and recover if needed.
+
+~ct_switchWithRecovery = { arg mpb, gui, fade = 0.12;
+    var ensureNextAudible, auditAndFix, fadeLocal, myGen;
+
+    // initialize state vars once
+    if(~ct_switchBusy.isNil) { ~ct_switchBusy = false };
+    if(~ct_switchGen.isNil)  { ~ct_switchGen  = 0     };
+
+    // prevent overlapping switches (re-entrant safe)
+    if(~ct_switchBusy == true) {
+        "[CT->MPB] switch ignored (busy)".postln;
+        ^nil;
+    };
+
+    ~ct_switchBusy = true;
+    ~ct_switchGen  = ~ct_switchGen + 1;
+    myGen          = ~ct_switchGen;
+
+    ensureNextAudible = {
+        var effNext, last;
+        effNext = mpb.effectiveNext;
+        last    = effNext[effNext.size - 1];
+        if(last == \ts0) {
+            "[CT->MPB] guard: NEXT tail \\ts0 -> /setSource/testmelody".postln;
+            // Use the original adapter to avoid wrapping recursion
+            ~ct_applyOSCPathToMPB_raw.("/setSource/testmelody", mpb, gui);
+        };
+    };
+
+    auditAndFix = {
+        var a, b;
+        // ignore stale audits from older generations
+        if(~ct_switchGen != myGen) { ^nil };
+
+        a = Ndef(\chainA).isPlaying;
+        b = Ndef(\chainB).isPlaying;
+
+        if((a or: { b }).not) {
+            "[CT->MPB] post-switch audit: both stopped -> recovering CURRENT & OptionA".postln;
+            mpb.playCurrent;
+            mpb.enforceExclusiveCurrentOptionA(0.1);
+        };
+        ("[PLAY] A=% B=%".format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
+
+        // release busy flag only after our generation’s audit runs
+        ~ct_switchBusy = false;
+    };
+
+    fadeLocal = fade ? 0.12;
+
+    ensureNextAudible.value;
+    mpb.switchChain(fadeLocal);
+
+    // schedule audit a bit after the fade completes; protect with generation check
+    AppClock.sched(fadeLocal + 0.20, { auditAndFix.value; nil });
+};
+
+
+/*~ct_switchWithRecovery = { arg mpb, gui, fade = 0.12;
+    var ensureNextAudible, auditAndFix, fadeLocal;
+
+    // Ensure NEXT ends with an audible source before switching.
+    ensureNextAudible = {
+        var effNext, last;
+        effNext = mpb.effectiveNext;
+        last = effNext[effNext.size - 1];
+        if(last == \ts0) {
+            "[CT->MPB] guard: NEXT tail \\ts0 -> /setSource/testmelody".postln;
+            ~ct_applyOSCPathToMPB_raw.("/setSource/testmelody", mpb, gui);
+        };
+    };
+
+    // After the crossfade, check A/B; if both false, make CURRENT audible and re-enforce Option A.
+    auditAndFix = {
+        var a, b;
+        a = Ndef(\chainA).isPlaying;
+        b = Ndef(\chainB).isPlaying;
+        if((a or: { b }).not) {
+            "[CT->MPB] post-switch audit: both stopped -> recovering CURRENT & OptionA".postln;
+            mpb.playCurrent;
+            mpb.enforceExclusiveCurrentOptionA(0.1);
+        };
+        ("[PLAY] A=% B=%".format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
+    };
+
+    fadeLocal = fade ? 0.12;
+    ensureNextAudible.value;
+    mpb.switchChain(fadeLocal);
+    AppClock.sched(fadeLocal + 0.20, { auditAndFix.value; nil });
+};*/
+
+// 2) Wrapper adapter: intercept ONLY "/switch"; delegate all other paths to the original.
+~ct_applyOSCPathToMPB = { arg path, mpb, gui;
+    var p, f;
+    p = path.asString;
+    if(p == "/switch") {
+        f = 0.12; // keep your usual fade; adjust if you use a different default
+        ~ct_switchWithRecovery.(mpb, gui, f);
+    }{
+        ~ct_applyOSCPathToMPB_raw.(p, mpb, gui);
+    };
+};
+
 )
