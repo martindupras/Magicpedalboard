@@ -1,4 +1,4 @@
-/* MagicDisplayGUI.sc v0.2.6
+/* MagicDisplayGUI.sc v0.2.7
  CURRENT column highlighted in green; top-down list (src → procs → sink);
  expectation text + visual countdown; operations list with 3s pre-roll;
  embedded meters (A/B). UI-ready queue prevents touching nil views.
@@ -35,7 +35,7 @@ MagicDisplayGUI : MagicDisplay {
 
 	*initClass {
 		var text;
-		versionGUI = "v0.2.6";
+		versionGUI = "v0.2.7";
 		text = "MagicDisplayGUI " ++ versionGUI;
 		text.postln;
 	}
@@ -398,6 +398,69 @@ MagicDisplayGUI : MagicDisplay {
 	// --- canonical enableMeters: waits until sinks are audio-rate, then attaches meters ---
 // MagicDisplayGUI.sc
 // canonical enableMeters: resend SynthDefs every time; wait until sinks are audio-rate
+
+	enableMeters { arg flag = true;
+    var shouldEnable, busA, busB;
+
+    shouldEnable = flag ? true;
+    enableMetersFlag = shouldEnable;
+
+    if(shouldEnable) {
+        // Guard: wait until sinks are audio-rate and server is up
+        busA = Ndef(\chainA).bus;
+        busB = Ndef(\chainB).bus;
+        if(
+            Server.default.serverRunning.not
+            or: { busA.isNil or: { busB.isNil } }
+            or: { busA.rate != \audio or: { busB.rate != \audio } }
+        ) {
+            AppClock.sched(0.20, { this.enableMeters(true); nil });
+            ^this;
+        };
+
+        // Meters rely on SynthDefs provided by MagicDisplay.ensureMeterDefs(...)
+        Server.default.bind({
+            if(meterSynthA.notNil) { meterSynthA.free };
+            if(meterSynthB.notNil) { meterSynthB.free };
+            meterSynthA = Synth(\busMeterA, [\inBus, Ndef(\chainA).bus.index, \rate, 24],
+                target: Server.default.defaultGroup, addAction: \addToTail);
+            meterSynthB = Synth(\busMeterB, [\inBus, Ndef(\chainB).bus.index, \rate, 24],
+                target: Server.default.defaultGroup, addAction: \addToTail);
+        });
+
+        if(oscA.notNil) { oscA.free }; if(oscB.notNil) { oscB.free };
+        oscA = OSCdef(\ampA, { arg msg;
+            var leftAmp, rightAmp, levelAvg;
+            leftAmp = msg[3]; rightAmp = msg[4];
+            levelAvg = ((leftAmp + rightAmp) * 0.5).clip(0, 1);
+            AppClock.sched(0, { if(meterViewA.notNil) { meterViewA.value_(levelAvg) }; nil });
+        }, '/ampA');
+
+        oscB = OSCdef(\ampB, { arg msg;
+            var leftAmp, rightAmp, levelAvg;
+            leftAmp = msg[3]; rightAmp = msg[4];
+            levelAvg = ((leftAmp + rightAmp) * 0.5).clip(0, 1);
+            AppClock.sched(0, { if(meterViewB.notNil) { meterViewB.value_(levelAvg) }; nil });
+        }, '/ampB');
+
+        ^this;
+    }{
+        Server.default.bind({
+            if(meterSynthA.notNil) { meterSynthA.free; meterSynthA = nil; };
+            if(meterSynthB.notNil) { meterSynthB.free; meterSynthB = nil; };
+        });
+        if(oscA.notNil) { oscA.free; oscA = nil; };
+        if(oscB.notNil) { oscB.free; oscB = nil; };
+        AppClock.sched(0, {
+            if(meterViewA.notNil) { meterViewA.value_(0.0) };
+            if(meterViewB.notNil) { meterViewB.value_(0.0) };
+            nil
+        });
+        ^this;
+    };
+}
+
+/*
 enableMeters { arg flag = true;
     var shouldEnable, aOK, bOK, busA, busB;
 
@@ -479,8 +542,8 @@ enableMeters { arg flag = true;
         });
         ^this;
     };
-}
-
+}*/
+//////
 /*	enableMeters { arg flag = true;
 		var shouldEnable, aOK, bOK, busA, busB;
 

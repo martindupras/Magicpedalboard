@@ -1,4 +1,4 @@
-/* MagicPedalboardNew.sc v0.4.6
+/* MagicPedalboardNew.sc v0.4.7
  A/B pedalboard chain manager built on Ndefs.
 
  - Chains are Arrays of Symbols ordered [sink, …, source].
@@ -19,20 +19,21 @@ MagicPedalboardNew : Object {
 	// ───────────────────────────────────────────────────────────────
 	// instance state
 	// ───────────────────────────────────────────────────────────────
-	var <currentChain;     // read-only pointer to Array of Symbols
+	var < currentChain;     // read-only pointer to Array of Symbols
 	var <nextChain;        // read-only pointer to Array of Symbols
 	var chainAList;        // [\chainA, ...processors..., source]
 	var chainBList;        // [\chainB, ...processors..., source]
 	var bypassA;           // IdentityDictionary: key(Symbol) -> Bool
 	var bypassB;           // IdentityDictionary: key(Symbol) -> Bool
-	var <defaultNumChannels;
-	var <defaultSource;
-	var <display;          // optional display adaptor
+	var < defaultNumChannels;
+	var < defaultSource;
+	var < display;          // optional display adaptor
 	var < processorLib;
+	var < ready;              // <-- ADD this line
 
 	*initClass {
 		var text;
-		version = "v0.4.6";
+		version = "v0.4.7";
 		text = "MagicPedalboardNew " ++ version;
 		text.postln;
 	}
@@ -96,6 +97,15 @@ MagicPedalboardNew : Object {
 
 		// enforce exclusive invariant (Option A) at first bring-up
 		this.enforceExclusiveCurrentOptionA(0.1);
+
+
+
+// set initial state; the poll will flip it once conditions are true
+ready = false;
+
+// OPTION A: enable background poll (comment out if you prefer Option B)
+this.startReadyPoll;
+
 
 		^this
 	}
@@ -711,4 +721,68 @@ enforceExclusiveCurrentOptionA { arg fadeCurrent = 0.1;
 		};
 
     }*/
+
+	// ---- Ready helpers (public API) ----
+// boolean snapshot (no server ops)
+isReady {
+    ^ready
+}
+
+// AppClock polling; onReadyFunc is optional
+waitUntilReady { arg timeoutSec = 2.0, pollSec = 0.05, onReadyFunc = nil;
+    var startTime, tick;
+    startTime = Main.elapsedTime;
+
+    AppClock.sched(0, {
+        tick = {
+            if(this.readyConditionOk) {
+                ready = true;
+                if(onReadyFunc.notNil) { onReadyFunc.value };
+                nil
+            }{
+                if((Main.elapsedTime - startTime) > timeoutSec) {
+                    // timed out; leave 'ready' as-is
+                    nil
+                }{
+                    AppClock.sched(pollSec, tick)
+                }
+            }
+        };
+        tick.value;
+        nil
+    });
+    ^this
+}
+
+// ---- Ready helpers (internal; no leading underscore) ----
+
+// light background poll started from init (OPTION A)
+startReadyPoll {
+    var alreadyTrue;
+    alreadyTrue = this.readyConditionOk;
+    if(alreadyTrue) { ready = true; ^this };
+    this.waitUntilReady(2.0, 0.05, { nil });
+    ^this
+}
+
+// compute the readiness condition; no server ops here
+readyConditionOk {
+    var curSink, nxtSink, serverOk, curBus, nxtBus, busesOk, currentPlaying;
+
+    curSink = currentChain[0];
+    nxtSink = nextChain[0];
+
+    serverOk = Server.default.serverRunning;
+
+    curBus = Ndef(curSink).bus;
+    nxtBus = Ndef(nxtSink).bus;
+
+    busesOk = curBus.notNil and: { nxtBus.notNil }
+        and: { curBus.rate == \audio } and: { nxtBus.rate == \audio };
+
+    currentPlaying = Ndef(curSink).isPlaying;
+
+    ^(serverOk and: { busesOk } and: { currentPlaying })
+}
+
 }
