@@ -1,79 +1,130 @@
 // StartHere_Milestone_BringUpAndRun.scd
-// v0.1.1
-// MD 20250918-16:05 BST
+// v0.1.5b
+// MD 20250918-18:36 BST
 
-/* Purpose
-   - End-to-end: clean bring-up (single window, meters) + today's milestone playlist.
-   - Fixes race where ~mpb was nil when .waitUntilReady was called.
-   - Pins sinks to stereo early and enforces Option A before enabling meters.
-   Style
-   - tilde vars at top-level; var-first in every function/closure; lowercase methods; no server.sync;
-   - server ops in Server.default.bind; GUI ops on AppClock; JITLib operator exactly "<<>";
-   - generated audio only; sinks/processors read from \in.ar(2).
+/*
+Purpose
+- Clean, deterministic bring-up (fresh boot) + today's CommandTree-mimic milestone playlist.
+- Simpler, robust boot sequencing: poll 'serverRunning'/'booting' (no doWhenBooted), so it proceeds
+  even if the server is already booting. Extra step logs to confirm progression.
+
+Style
+- tilde vars at top-level; var-first in every function/closure; lowercase method names; no server.sync;
+- server ops inside Server.default.bind; GUI ops on AppClock; JITLib operator exactly "<<>";
+- generated audio only (no SoundIn); sinks/processors read from \in.ar(2).
 */
 
 (
-var log, pollUntil, bootAndInit, makeGui, makeMpb, pinSinksAndOptionA, ensureSources, loadAdapter;
-var waitOnMpbReady, enableMetersSafe, runMilestone, runAll, gapSeconds;
+var log, step, pollUntil, freshBoot, makeGui, makeMpb, ensureSources;
+var settleBeforeMeters, loadAdapterRobust, installInlineAdapter;
+var waitOnMpbReadyThen, enableMetersAfterReady, runMilestone, runAll;
+var gapSeconds, meterDelaySec;
 
-// ---- logger
-log = { arg s; ("[RUN] " ++ s).postln };
+// ---------- capture this script's directory once (for absolute loads) ----------
+~scriptDir = ~scriptDir ?? {
+    var pathString, dirString;
+    pathString = thisProcess.nowExecutingPath;
+    dirString = if(pathString.notNil) { PathName(pathString).pathOnly } { thisProcess.cwd };
+    dirString
+};
+("[DEBUG] scriptDir=" ++ ~scriptDir).postln;
 
-// ---- small AppClock poll helper
-pollUntil = { arg condFunc, everySeconds = 0.05, onOkFunc;
-    var tick;
-    tick = {
-        var ok;
-        ok = condFunc.value;
-        if(ok) { onOkFunc.value; nil } { AppClock.sched(everySeconds, tick) }
-    };
-    AppClock.sched(0, tick);
+// ---------- small logger ----------
+log = { arg messageString;
+    var lineText;
+    lineText = "[RUN] " ++ messageString;
+    lineText.postln;
 };
 
-// ---- 1) Boot server if needed, init tree, set meter channel defs
-bootAndInit = {
-    var s, doInit;
-    s = Server.default;
-    doInit = {
+// terse step tagger
+step = { arg tag; ("[STEP] " ++ tag).postln };
+
+// ---------- generic AppClock poll (no server.sync) ----------
+pollUntil = { arg conditionFunc, everySeconds = 0.05, onOkFunc;
+    var tickFunc, secondsLocal, condFuncLocal, onOkLocal;
+    condFuncLocal = conditionFunc;
+    secondsLocal = everySeconds ? 0.05;
+    onOkLocal = onOkFunc ? { nil };
+    tickFunc = {
+        var okNow;
+        okNow = condFuncLocal.value;
+        if(okNow) { onOkLocal.value; nil } { AppClock.sched(secondsLocal, tickFunc) }
+    };
+    AppClock.sched(0, tickFunc);
+};
+
+// ---------- reset globals before start ----------
+~gui = nil;
+~mpb = nil;
+
+// ---------- 0) Fresh boot (polling): quit -> wait down -> boot -> wait up -> initTree ----------
+freshBoot = {
+    var serverRef, waitDown, waitUp, doInitTree;
+    serverRef = Server.default;
+
+    doInitTree = {
+        var ignore;
+        ignore = nil;
         Server.default.bind({
-            s.initTree;
-            s.defaultGroup.freeAll;
+            serverRef.initTree;
+            serverRef.defaultGroup.freeAll;
         });
-        // define meter SynthDefs (compile-time channel count)
-        MagicDisplay.setMeterChannels(2);
+        MagicDisplay.setMeterChannels(2); // compile-time meter defs to 2ch
         log.("server tree inited; meter defs set to 2ch");
     };
-    if(s.serverRunning.not) {
-        log.("booting server…");
-        s.boot;
-        // wait until serverRunning without server.sync
-        pollUntil.value({ Server.default.serverRunning }, 0.05, { doInit.value });
+
+    waitUp = {
+        var cond;
+        cond = { serverRef.serverRunning };
+        pollUntil.value(cond, 0.05, {
+            doInitTree.value;
+        });
+    };
+
+    waitDown = {
+        var cond;
+        cond = { serverRef.serverRunning.not and: { serverRef.booting.not } };
+        pollUntil.value(cond, 0.05, {
+            log.("fresh boot: starting server…");
+            serverRef.boot;
+            waitUp.value;
+        });
+    };
+
+    if(serverRef.serverRunning or: { serverRef.booting }) {
+        log.("fresh boot: quitting current server…");
+        serverRef.quit;
+        // give the server a moment to start going down, then poll until fully down
+        AppClock.sched(0.05, { waitDown.value; nil });
     }{
-        log.("server already running; reusing");
-        doInit.value;
+        log.("fresh boot: starting server…");
+        serverRef.boot;
+        waitUp.value;
     };
 };
 
-// ---- 2) Close old GUI windows, then make a fresh GUI (AppClock)
+// ---------- 1) GUI: close old MagicDisplayGUI and create a fresh one ----------
 makeGui = {
-    var closeOld;
-    closeOld = {
-        var wins;
-        wins = Window.allWindows.select({ arg w;
-            var nm; nm = w.tryPerform(\name);
-            nm.notNil and: { nm.asString.beginsWith("MagicDisplayGUI") }
+    var closeOldFunc;
+    closeOldFunc = {
+        var windowsList;
+        windowsList = Window.allWindows.select({ arg w;
+            var nameString, isMagic;
+            nameString = w.tryPerform(\name);
+            isMagic = nameString.notNil and: { nameString.asString.beginsWith("MagicDisplayGUI") };
+            isMagic
         });
-        wins.do({ arg w; w.close });
+        windowsList.do({ arg w; w.close });
         log.("closed any existing MagicDisplayGUI windows");
     };
     AppClock.sched(0, {
-        closeOld.value;
+        closeOldFunc.value;
         ~gui = MagicDisplayGUI.new;
         nil
     });
 };
 
-// ---- 3) Make the pedalboard AFTER GUI exists (AppClock chain)
+// ---------- 2) MPB: create AFTER GUI exists ----------
 makeMpb = {
     pollUntil.value({ ~gui.notNil }, 0.05, {
         AppClock.sched(0, {
@@ -84,109 +135,171 @@ makeMpb = {
     });
 };
 
-// ---- 4) Ensure generated sources only (no SoundIn)
+// ---------- 3) Sources (generated only) ----------
 ensureSources = {
     Server.default.bind({
         if(Ndef(\testmelody).source.isNil) {
             Ndef(\testmelody, {
-                var trig, seq, f, env, pan;
-                trig = Impulse.kr(3.2);
-                seq  = Dseq([220,277.18,329.63,392,329.63,277.18,246.94], inf);
-                f    = Demand.kr(trig, 0, seq);
-                env  = Decay2.kr(trig, 0.01, 0.35);
-                pan  = ToggleFF.kr(trig).linlin(0,1,-0.6,0.6);
-                Pan2.ar(SinOsc.ar(f) * env * 0.25, pan)
+                var trig, seq, freqSig, envAmp, panPos, outSig;
+                trig    = Impulse.kr(3.2);
+                seq     = Dseq([220,277.18,329.63,392,329.63,277.18,246.94], inf);
+                freqSig = Demand.kr(trig, 0, seq);
+                envAmp  = Decay2.kr(trig, 0.01, 0.35);
+                panPos  = ToggleFF.kr(trig).linlin(0,1,-0.6,0.6);
+                outSig  = Pan2.ar(SinOsc.ar(freqSig) * envAmp * 0.25, panPos);
+                outSig
             });
         };
         Ndef(\testmelody).ar(2);
-        Ndef(\ts0, { Silent.ar(2) }); Ndef(\ts0).ar(2);
+        Ndef(\ts0, { Silent.ar(2) });
+        Ndef(\ts0).ar(2);
     });
-    log.("sources ensured (\testmelody stereo; \ts0 silent stereo)");
+    log.("sources ensured (\\testmelody stereo; \\ts0 silent stereo)");
 };
 
-// ---- 5) Pin sinks to stereo and enforce Option A BEFORE meters try to attach
-pinSinksAndOptionA = {
+// ---------- 4) Settle BEFORE meters: Option A + pin sinks (NO setSourcesBoth here) ----------
+settleBeforeMeters = {
     pollUntil.value({ ~mpb.notNil }, 0.05, {
-        // enforce class-level Option A which also molds sinks
-        ~mpb.enforceExclusiveCurrentOptionA(0.1);
-        // extra belt-and-braces: pin explicitly
+        ~mpb.playCurrent;                         // deterministic CURRENT audible
+        ~mpb.enforceExclusiveCurrentOptionA(0.1); // NEXT silent at source
+
         Server.default.bind({
             Ndef(\chainA).mold(2, \audio);
             Ndef(\chainB).mold(2, \audio);
         });
-        log.("sinks pinned to 2ch; Option A enforced");
-        // quick visibility
+
         ~mpb.printChains;
         ("[PLAY] A=% B=%"
             .format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
     });
 };
 
-// ---- 6) Adapter (idempotent)
-loadAdapter = {
+// ---------- 5) Adapter: absolute-load robustly; fallback to inline mini-adapter ----------
+installInlineAdapter = {
     if(~ct_applyOSCPathToMPB.isNil) {
-        "adapter_commandtree_to_magicpedalboard.scd".loadRelative;
-        log.("adapter loaded");
-    }{
-        log.("adapter already present");
+        ~ct_applyOSCPathToMPB = { arg pathString, mpb, gui;
+            var tokens, normalized, verbLower, argsList, onOffStr, procSym, idxA, idxB, lastTail;
+            tokens = pathString.asString.split($/).reject({ arg t; t.isEmpty }).collect(_.asString);
+            normalized = if(tokens.size > 0 and: { tokens[0] == "commands" }) { tokens.copyRange(1, tokens.size - 1) } { tokens };
+            verbLower = (normalized.size > 0).if({ normalized[0].toLower }, { "" });
+            argsList  = (normalized.size > 1).if({ normalized.copyRange(1, normalized.size - 1) }, { [] });
+
+            switch(verbLower,
+                "add",      { if(argsList.size >= 1) { procSym = argsList[0].asSymbol; mpb.add(procSym) } },
+                "bypass",   {
+                    if(argsList.size >= 2) {
+                        procSym  = argsList[0].asSymbol;
+                        onOffStr = argsList[1].toLower;
+                        onOffStr = (["on","off","true","false","1","0"].includes(onOffStr)).if({
+                            if((onOffStr=="true") or: { onOffStr=="1" }) { "on" } { onOffStr }
+                        }, { "on" });
+                        mpb.bypass(procSym, onOffStr=="on");
+                    };
+                },
+                "removeat", { if(argsList.size >= 1) { mpb.removeAt(argsList[0].asInteger) } },
+                "swap",     { if(argsList.size >= 2) { idxA=argsList[0].asInteger; idxB=argsList[1].asInteger; mpb.swap(idxA, idxB) } },
+                "setsource",{ if(argsList.size >= 1) { mpb.setSource(argsList[0].asSymbol) } },
+                "switch",   {
+                    lastTail = mpb.effectiveNext.last;
+                    if(lastTail == \ts0) { mpb.setSource(\testmelody) }; // guard
+                    mpb.switchChain(0.12);
+                },
+                { /* ignore unknown */ }
+            );
+        };
+        log.("inline mini-adapter installed (fallback)");
     };
 };
 
-// ---- 7) Wait on MPB readiness ONLY when ~mpb exists
-waitOnMpbReady = { arg onReadyFunc;
-    var onReadyLocal;
-    onReadyLocal = onReadyFunc ? { nil };
+loadAdapterRobust = {
+    var adapterFileLower, adapterFileCamel, existsLower, existsCamel;
+    if(~ct_applyOSCPathToMPB.notNil) {
+        log.("adapter already present");
+        ^this;
+    };
+    adapterFileLower = (~scriptDir +/+ "adapter_commandtree_to_magicpedalboard.scd").standardizePath;
+    adapterFileCamel = (~scriptDir +/+ "adapter_CommandTree_to_MagicPedalboard.scd").standardizePath;
+    existsLower = File.exists(adapterFileLower);
+    existsCamel = File.exists(adapterFileCamel);
+
+    if(existsLower) {
+        adapterFileLower.load; log.("adapter loaded: " ++ adapterFileLower);
+    }{
+        if(existsCamel) {
+            adapterFileCamel.load; log.("adapter loaded: " ++ adapterFileCamel);
+        }{
+            log.("adapter file not found near script; installing fallback");
+            installInlineAdapter.value;
+        };
+    };
+};
+
+// ---------- 6) Readiness gate only after ~mpb exists ----------
+waitOnMpbReadyThen = { arg onReadyFunc;
+    var onOkLocal;
+    onOkLocal = onReadyFunc ? { nil };
     pollUntil.value({ ~mpb.notNil }, 0.05, {
         ~mpb.waitUntilReady(2.5, 0.05, {
-            // meters later; just a status now
             ("[PLAY] A=% B=%"
                 .format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
-            onReadyLocal.value;
+            onOkLocal.value;
         });
     });
 };
 
-// ---- 8) Enable meters safely AFTER readiness
-enableMetersSafe = {
-    if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) {
-        ~gui.enableMeters(false);
-        ~gui.enableMeters(true);
-        log.("meters enabled after readiness");
-    };
-    // chain sanity line expected by your prompt
-    ("[CHECK] Ndef chain channels -> A:% , B:%"
-        .format(Ndef(\chainA).tryPerform(\numChannels), Ndef(\chainB).tryPerform(\numChannels))).postln;
+// ---------- 7) Re-enforce Option A and enable meters AFTER readiness (with a short delay) ----------
+enableMetersAfterReady = {
+    var postDelay;
+    postDelay = meterDelaySec ? 0.25; // small settle delay
+
+    AppClock.sched(postDelay, {
+        ~mpb.enforceExclusiveCurrentOptionA(0.1); // re-check exclusivity before meters
+
+        if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) {
+            ~gui.enableMeters(false);
+            ~gui.enableMeters(true);
+            log.("meters enabled after readiness");
+        };
+        ("[CHECK] Ndef chain channels -> A:% , B:%"
+            .format(Ndef(\chainA).tryPerform(\numChannels), Ndef(\chainB).tryPerform(\numChannels))).postln;
+        nil
+    });
 };
 
-// ---- 9) Milestone playlist via adapter
+// ---------- 8) Milestone playlist (single prime sets sources) ----------
 runMilestone = {
-    var applyPath, prime, playlist, idx, total, step, gap;
+    var gapLocal, applyPathFunc, primeFunc, playlistArray, stepIndex, stepCount, stepFunc;
+    gapLocal = 0.60;
 
-    gap = gapSeconds ? 0.60;
-    applyPath = { arg p;
-        ("[TOKENS] apply -> " ++ p).postln;
-        ~ct_applyOSCPathToMPB.(p, ~mpb, ~gui);
+    applyPathFunc = { arg pathString;
+        var lineText;
+        lineText = "[TOKENS] apply -> " ++ pathString;
+        lineText.postln;
+        ~ct_applyOSCPathToMPB.(pathString, ~mpb, ~gui);
     };
 
-    prime = {
-        ~mpb.setSourcesBoth(\testmelody); // today both end with testmelody
+    primeFunc = {
+        ~mpb.setSourcesBoth(\testmelody);     // single place we set both tails today
         ~mpb.enforceExclusiveCurrentOptionA(0.1);
         ~mpb.printChains;
         ("[PLAY] A=% B=%"
             .format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
     };
 
-    playlist = [
+    playlistArray = [
         "/add/delay",
         "/switch",
         "/bypass/delay/on",
         "/bypass/delay/off",
         "/switch"
     ];
-    idx = 0; total = playlist.size;
+    stepIndex = 0;
+    stepCount = playlistArray.size;
 
-    step = {
-        if(idx >= total) {
+    stepFunc = {
+        var doneNow;
+        doneNow = (stepIndex >= stepCount);
+        if(doneNow) {
             AppClock.sched(0.9, {
                 ("[PLAY] A=% B=%"
                     .format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
@@ -195,32 +308,41 @@ runMilestone = {
             });
             ^nil
         };
-        applyPath.value(playlist[idx]);
-        idx = idx + 1;
-        AppClock.sched(gap, step);
+        applyPathFunc.value(playlistArray[stepIndex]);
+        stepIndex = stepIndex + 1;
+        AppClock.sched(gapLocal, stepFunc);
     };
 
-    prime.value;
-    AppClock.sched(gap, step);
+    primeFunc.value;
+    AppClock.sched(gapLocal, stepFunc);
 };
 
-// ---- 10) Orchestrate
+// ---------- 9) Orchestrate strictly in order ----------
 runAll = {
-    bootAndInit.value;
-    // wait for server to be running before touching GUI/MPB
-    pollUntil.value({ Server.default.serverRunning }, 0.05, {
-        makeGui.value;
-        makeMpb.value;
-        ensureSources.value;
-        pinSinksAndOptionA.value;   // before meters
-        loadAdapter.value;
-        waitOnMpbReady.value({
-            enableMetersSafe.value;
-            runMilestone.value;
+    var proceedAfterBoot;
+    proceedAfterBoot = {
+        makeGui.value;           step.("GUI");
+        makeMpb.value;           step.("MPB create");
+        ensureSources.value;     step.("sources");
+        settleBeforeMeters.value;step.("settle-before-meters");
+        loadAdapterRobust.value; step.("adapter");
+        waitOnMpbReadyThen.value({
+            enableMetersAfterReady.value; step.("meters");
+            runMilestone.value;          step.("playlist");
         });
+    };
+    log.("orchestration start");
+    freshBoot.value;             step.("boot-in-progress");
+    // Continue once server is really running and tree initialized
+    pollUntil.value({ Server.default.serverRunning }, 0.05, {
+        // a tiny guard in case initTree hasn't run yet
+        AppClock.sched(0.10, { proceedAfterBoot.value; nil });
     });
 };
 
-gapSeconds = 0.60;
+gapSeconds    = 0.60;
+meterDelaySec = 0.25;
+
+// fire
 runAll.value;
 )
