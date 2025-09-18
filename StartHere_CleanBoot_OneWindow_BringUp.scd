@@ -1,5 +1,5 @@
 // StartHere_CleanBoot_OneWindow_BringUp.scd
-// v0.5.9
+// v0.5.9.1
 // MD 20250917-1616
 //
 // Purpose:
@@ -21,7 +21,7 @@ var log, s, numChConst,
     closeGuiWindows, freshBoot, ensureMeterDefs, checkChainChannels,
     clearOldNdefs, buildAudio, makeGuiAndMpb,
     waitForServerDownThenUp, baselinePlayWithRetry, metersOn, verify,
-    runSequence;
+    runSequence,waitOnMpbReady;
 
 log = { arg msg; ("[START] " ++ msg).postln };
 s   = Server.default;
@@ -264,24 +264,50 @@ verify = {
 
 // 11b) Wait for MPB "ready" and then do meters + verify (no fixed sleeps)
 waitOnMpbReady = {
-    var onReady;
+    var onReady;  // var-first in outer function
+
     onReady = {
+        var a, b;  // var-first in inner function/closure
+
         // meters on only when sinks are AR and CURRENT is playing
         if(~gui.respondsTo(\enableMeters)) { ~gui.enableMeters(true) };
+
         ~mpb.printChains;
 
         ("[PLAY] A=% B=%"
             .format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
 
-        // your existing channel sanity print
-        var a = Ndef(\chainA).tryPerform(\numChannels);
-        var b = Ndef(\chainB).tryPerform(\numChannels);
+        // channel sanity print
+        a = Ndef(\chainA).tryPerform(\numChannels);
+        b = Ndef(\chainB).tryPerform(\numChannels);
         ("[CHECK] Ndef chain channels → A:% , B:%".format(a, b)).postln;
     };
 
     // use the new class helper; no sleeps here
     ~mpb.waitUntilReady(2.5, 0.05, onReady);
 };
+
+
+// // 11b) Wait for MPB "ready" and then do meters + verify (no fixed sleeps)
+// waitOnMpbReady = {
+// 	var onReady;
+// 	onReady = {
+// 		// meters on only when sinks are AR and CURRENT is playing
+// 		if(~gui.respondsTo(\enableMeters)) { ~gui.enableMeters(true) };
+// 		~mpb.printChains;
+//
+// 		("[PLAY] A=% B=%"
+// 		.format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
+//
+// 		// your existing channel sanity print
+// 		var a = Ndef(\chainA).tryPerform(\numChannels);
+// 		var b = Ndef(\chainB).tryPerform(\numChannels);
+// 		("[CHECK] Ndef chain channels → A:% , B:%".format(a, b)).postln;
+// 	};
+//
+// 	// use the new class helper; no sleeps here
+// 	~mpb.waitUntilReady(2.5, 0.05, onReady);
+// };
 
 
 
@@ -318,7 +344,7 @@ baselinePlayWithRetry.value;
 // 7–8) Wait on a real MPB condition, then meters + verify (no fixed sleeps)
 waitOnMpbReady.value;
 
-		//removes in 0.5.9
+		//removed in 0.5.9
 /*        // 6) Baseline + robust play
         baselinePlayWithRetry.value;
 
