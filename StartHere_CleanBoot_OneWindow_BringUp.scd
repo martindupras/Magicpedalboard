@@ -126,6 +126,7 @@ clearOldNdefs = {
     });
 };
 
+
 // 6) Build sinks and sources (server ops)
 buildAudio = {
     Server.default.bind({
@@ -216,6 +217,7 @@ waitForServerDownThenUp = {
     };
 };
 
+
 // 9) Baseline + robust play with retry (ensures MPB has built server groups)
 baselinePlayWithRetry = {
     var attempts, ok;
@@ -260,6 +262,29 @@ verify = {
     checkChainChannels.value;
 };
 
+// 11b) Wait for MPB "ready" and then do meters + verify (no fixed sleeps)
+waitOnMpbReady = {
+    var onReady;
+    onReady = {
+        // meters on only when sinks are AR and CURRENT is playing
+        if(~gui.respondsTo(\enableMeters)) { ~gui.enableMeters(true) };
+        ~mpb.printChains;
+
+        ("[PLAY] A=% B=%"
+            .format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
+
+        // your existing channel sanity print
+        var a = Ndef(\chainA).tryPerform(\numChannels);
+        var b = Ndef(\chainB).tryPerform(\numChannels);
+        ("[CHECK] Ndef chain channels → A:% , B:%".format(a, b)).postln;
+    };
+
+    // use the new class helper; no sleeps here
+    ~mpb.waitUntilReady(2.5, 0.05, onReady);
+};
+
+
+
 // --- Execute clean sequence in one AppClock Routine --------------------------
 runSequence = {
     var waitPreGUI, waitAfterMPB;
@@ -274,7 +299,8 @@ runSequence = {
         freshBoot.value;
 
         // 2) Predefine meter SynthDefs post-boot (safe re-add)
-        ensureMeterDefs.value;
+        // ensureMeterDefs.value;
+		MagicDisplay.setMeterChannels(numChConst);
 
         // 3) Start clean, then build audio graph
         clearOldNdefs.value;
@@ -287,8 +313,13 @@ runSequence = {
         // 5) Watch for server going down and coming back; then re-publish defs/graph
         waitAfterMPB.wait;    // allow immediate /quit to show up
         waitForServerDownThenUp.value;
+// 6) Baseline + robust play (kept, since it launches CURRENT deterministically)
+baselinePlayWithRetry.value;
+// 7–8) Wait on a real MPB condition, then meters + verify (no fixed sleeps)
+waitOnMpbReady.value;
 
-        // 6) Baseline + robust play
+		//removes in 0.5.9
+/*        // 6) Baseline + robust play
         baselinePlayWithRetry.value;
 
         // 7) Turn meters on
@@ -297,7 +328,7 @@ runSequence = {
 
         // 8) Verify
         0.20.wait;
-        verify.value;
+        verify.value;*/
     }).play(AppClock);
 };
 
