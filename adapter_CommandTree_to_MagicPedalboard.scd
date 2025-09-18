@@ -29,11 +29,25 @@ var alreadyWrapped;
     params = tokens.copyRange(1, tokens.size - 1);
 
     switch(verb,
-        \add, {
+
+/*        \add, {
             if(params.size >= 1) { pedalboard.add(params[0]); ~ct_log.("add " ++ params[0]); consumed = 2; }
             { ~ct_log.("add: missing processor"); consumed = 1; };
-        },
-        \bypass, {
+        },*/
+\add, {
+    if(params.size >= 1) {
+        var procSym;
+        procSym = params[0].asSymbol;
+        ~ct_ensureProcessor.(procSym);        // <-- ensure Ndef exists and is stereo
+        pedalboard.add(procSym);
+        ~ct_log.("add " ++ procSym);
+        consumed = 2;
+    }{
+        ~ct_log.("add: missing processor"); consumed = 1;
+    };
+},
+
+		\bypass, {
             if(params.size >= 2) {
                 var procSym, stateBool;
                 procSym = params[0];
@@ -219,5 +233,60 @@ if(alreadyWrapped.not) {
         ~ct_applyOSCPathToMPB_raw.(p, mpb, gui);
     };
 };
+
+
+~ct_ensureProcessor = { arg keySym;
+    var k;
+    k = keySym.asSymbol;
+
+    Server.default.bind({
+        var defineDelay, defineBypass, defineIdentity;
+
+        defineIdentity = {
+            var make;
+            make = {
+                // pass-through “processor” that keeps stereo and \in.ar(2)
+                // used as a safe fallback for unknown keys
+                Ndef(k, { var sig; sig = \in.ar(2); sig });
+                Ndef(k).ar(2);
+            };
+            if(Ndef(k).source.isNil) { make.value } { Ndef(k).ar(2) };
+        };
+
+        defineDelay = {
+            var make;
+            make = {
+                // simple stereo delay: read from \in.ar(2) → short delay → mix
+                Ndef(\delay, {
+                    var sig, del, time, fb, mix;
+                    sig  = \in.ar(2);
+                    time = 0.25;   // s
+                    fb   = 0.25;
+                    mix  = 0.5;
+                    del  = DelayC.ar(sig + (LocalIn.ar(2) * fb), 1.0, time);
+                    LocalOut.ar(del);
+                    XFade2.ar(sig, del, (mix * 2 - 1).clip(-1, 1))
+                });
+                Ndef(\delay).ar(2);
+            };
+            if(Ndef(\delay).source.isNil) { make.value } { Ndef(\delay).ar(2) };
+        };
+
+        defineBypass = {
+            // A named pass-through “processor” you might use in test chains
+            var make;
+            make = {
+                Ndef(\bypass, { \in.ar(2) });
+                Ndef(\bypass).ar(2);
+            };
+            if(Ndef(\bypass).source.isNil) { make.value } { Ndef(\bypass).ar(2) };
+        };
+
+        // choose per key
+        if(k == \delay) { defineDelay.value }
+        { if(k == \bypass) { defineBypass.value } { defineIdentity.value } };
+    });
+};
+
 
 )

@@ -224,8 +224,23 @@ MagicDisplayGUI : MagicDisplay {
 		});
 	}
 
+
 	// visuals
-	highlightCurrentColumn {
+
+// highlight whichever sink is CURRENT
+highlightCurrentColumn { arg currentSinkSym;
+    var greenBg, neutralBg, isA;
+    greenBg   = Color(0.85, 1.0, 0.85);
+    neutralBg = Color(0.92, 0.92, 0.92);
+    isA = (currentSinkSym == \chainA);
+
+    this.queueUi({
+        if(leftPanel.notNil)  { leftPanel.background_(if(isA) { greenBg } { neutralBg }) };
+        if(rightPanel.notNil) { rightPanel.background_(if(isA) { neutralBg } { greenBg }) };
+    });
+}
+
+/*	highlightCurrentColumn {
 		var greenBg, neutralBg;
 		greenBg = Color(0.85, 1.0, 0.85);
 		neutralBg = Color(0.92, 0.92, 0.92);
@@ -233,7 +248,7 @@ MagicDisplayGUI : MagicDisplay {
 			if(leftPanel.notNil) { leftPanel.background_(greenBg) };
 			if(rightPanel.notNil) { rightPanel.background_(neutralBg) };
 		});
-	}
+	}*/
 
 	formatListTopDown { arg listRef, bypassKeys, effectiveList;
 		var itemsOut, lastIndex, processorsList, indexCounter, sourceKey, sinkKey, isBypassed, badge, lineText;
@@ -662,21 +677,39 @@ enableMeters { arg flag = true;
 	}
 
 	showSwitch { arg oldSink, newSink, current, next;
-		var infoText;
-		infoText = "[MPB:switch] " ++ oldSink ++ " → " ++ newSink;
-		this.queueUi({
-			// keep window title stable; show transient text in labels instead
-			this.highlightCurrentColumn;
-			if(opsStatusText.notNil) {
-				opsStatusText.string_("Switched: " ++ oldSink ++ " → " ++ newSink);
-			}{
-				if(expectationText.notNil) {
-					expectationText.string_("Switched: " ++ oldSink ++ " → " ++ newSink);
-				};
-			};
-		});
-		AppClock.sched(0, { infoText.postln; nil });
-	}
+    var infoText;
+    infoText = "[MPB:switch] " ++ oldSink ++ " → " ++ newSink;
+    this.queueUi({
+        // was: this.highlightCurrentColumn;
+        this.highlightCurrentColumn(newSink);               // <-- pass which sink is now CURRENT
+
+        if(opsStatusText.notNil) {
+            opsStatusText.string_("Switched: " ++ oldSink ++ " → " ++ newSink);
+        }{
+            if(expectationText.notNil) {
+                expectationText.string_("Switched: " ++ oldSink ++ " → " ++ newSink);
+            };
+        };
+    });
+    AppClock.sched(0, { infoText.postln; nil });
+}
+
+	// showSwitch { arg oldSink, newSink, current, next;
+	// 	var infoText;
+	// 	infoText = "[MPB:switch] " ++ oldSink ++ " → " ++ newSink;
+	// 	this.queueUi({
+	// 		// keep window title stable; show transient text in labels instead
+	// 		this.highlightCurrentColumn;
+	// 		if(opsStatusText.notNil) {
+	// 			opsStatusText.string_("Switched: " ++ oldSink ++ " → " ++ newSink);
+	// 		}{
+	// 			if(expectationText.notNil) {
+	// 				expectationText.string_("Switched: " ++ oldSink ++ " → " ++ newSink);
+	// 			};
+	// 		};
+	// 	});
+	// 	AppClock.sched(0, { infoText.postln; nil });
+	// }
 
 
 	showMutation { arg action, args, nextChain;
@@ -698,6 +731,30 @@ enableMeters { arg flag = true;
 	}
 
 	showChainsDetailed { arg current, next, bypassAKeys, bypassBKeys, effCurrent, effNext;
+    var currentItems, nextItems, effCurrentText, effNextText, aIsPlaying, bIsPlaying, aIsCurrent;
+
+    currentItems   = this.formatListTopDown(current, bypassAKeys, effCurrent);
+    nextItems      = this.formatListTopDown(next,   bypassBKeys, effNext);
+    effCurrentText = "eff: " ++ effCurrent.join(" -> ");
+    effNextText    = "eff: " ++ effNext.join(" -> ");
+
+    // detect which sink is CURRENT by the actual play state of the sink Ndef
+    aIsPlaying = Ndef(\chainA).isPlaying;
+    bIsPlaying = Ndef(\chainB).isPlaying;
+    aIsCurrent = (aIsPlaying and: { bIsPlaying.not });  // Option A expects XOR; if both stopped, keep previous
+    this.queueUi({
+        if(leftHeader.notNil)  { leftHeader.string_(if(aIsCurrent) { "CHAIN A ACTIVE" } { "CHAIN A NEXT" }) };
+        if(rightHeader.notNil) { rightHeader.string_(if(aIsCurrent) { "CHAIN B NEXT"  } { "CHAIN B ACTIVE" }) };
+
+        if(leftListView.notNil)  { leftListView.items_(currentItems) };
+        if(rightListView.notNil) { rightListView.items_(nextItems) };
+
+        if(leftEffective.notNil)  { leftEffective.string_(effCurrentText) };
+        if(rightEffective.notNil) { rightEffective.string_(effNextText) };
+    });
+}
+
+/*	showChainsDetailed { arg current, next, bypassAKeys, bypassBKeys, effCurrent, effNext;
 		var currentItems, nextItems, effCurrentText, effNextText;
 		currentItems = this.formatListTopDown(current, bypassAKeys, effCurrent);
 		nextItems = this.formatListTopDown(next,   bypassBKeys, effNext);
@@ -712,7 +769,7 @@ enableMeters { arg flag = true;
 			if(leftEffective.notNil)  { leftEffective.string_(effCurrentText) };
 			if(rightEffective.notNil) { rightEffective.string_(effNextText) };
 		});
-	}
+	}*/
 
 	showError { arg message;
 		var text;
