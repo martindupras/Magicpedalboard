@@ -11,6 +11,7 @@ Style
 */
 
 (
+/*("bob").postln;*/
 var log, need, ensureSources, verify, run;
 
 log = { arg s; ("[MILESTONE] " ++ s).postln };

@@ -25,10 +25,13 @@
  ++ "  B.playing=" ++ Ndef(\chainB).isPlaying).postln;
 ~mpb.printChains;
 // adapter_commandtree_to_magicpedalboard.scd
-// v0.3
-// MD 20250916-1038
+// v0.3.1
+// MD 20250916-14:49
 
 (
+
+var alreadyWrapped;
+
 ~ct_knownVerbs = #[\add, \bypass, \removeAt, \swap, \clear, \setSource, \switch];
 ~ct_knownProcs = #[\delay, \chorus, \tremolo, \reverb, \drive, \transpose, \hex, \audio, \filters, \delays, \noise, \oscillators];
 ~ct_log = { arg messageString; ("[CT->MPB] " ++ messageString).postln };
@@ -52,11 +55,25 @@
     params = tokens.copyRange(1, tokens.size - 1);
 
     switch(verb,
-        \add, {
+
+/*        \add, {
             if(params.size >= 1) { pedalboard.add(params[0]); ~ct_log.("add " ++ params[0]); consumed = 2; }
             { ~ct_log.("add: missing processor"); consumed = 1; };
-        },
-        \bypass, {
+        },*/
+\add, {
+    if(params.size >= 1) {
+        var procSym;
+        procSym = params[0].asSymbol;
+        ~ct_ensureProcessor.(procSym);        // <-- ensure Ndef exists and is stereo
+        pedalboard.add(procSym);
+        ~ct_log.("add " ++ procSym);
+        consumed = 2;
+    }{
+        ~ct_log.("add: missing processor"); consumed = 1;
+    };
+},
+
+		\bypass, {
             if(params.size >= 2) {
                 var procSym, stateBool;
                 procSym = params[0];
@@ -130,6 +147,174 @@
 ~ct_sendAndApply = { arg commandManager, pedalboard, gui;
     ~ct_applyQueueToMPBFromCM.(commandManager, pedalboard, gui);
 };
+
+
+
+// 0) Capture the original adapter exactly once so we can delegate non-switch paths safely.
+alreadyWrapped = (~ct_applyOSCPathToMPB_raw.notNil);
+if(alreadyWrapped.not) {
+    ~ct_applyOSCPathToMPB_raw = ~ct_applyOSCPathToMPB;
+};
+
+// 1) Helper: guard NEXT tail before switch, then audit after fade and recover if needed.
+
+~ct_switchWithRecovery = { arg mpb, gui, fade = 0.12;
+    var ensureNextAudible, auditAndFix, fadeLocal, myGen;
+
+    // initialize state vars once
+    if(~ct_switchBusy.isNil) { ~ct_switchBusy = false };
+    if(~ct_switchGen.isNil)  { ~ct_switchGen  = 0     };
+
+    // prevent overlapping switches (re-entrant safe)
+    if(~ct_switchBusy == true) {
+        "[CT->MPB] switch ignored (busy)".postln;
+        ^nil;
+    };
+
+    ~ct_switchBusy = true;
+    ~ct_switchGen  = ~ct_switchGen + 1;
+    myGen          = ~ct_switchGen;
+
+    ensureNextAudible = {
+        var effNext, last;
+        effNext = mpb.effectiveNext;
+        last    = effNext[effNext.size - 1];
+        if(last == \ts0) {
+            "[CT->MPB] guard: NEXT tail \\ts0 -> /setSource/testmelody".postln;
+            // Use the original adapter to avoid wrapping recursion
+            ~ct_applyOSCPathToMPB_raw.("/setSource/testmelody", mpb, gui);
+        };
+    };
+
+    auditAndFix = {
+        var a, b;
+        // ignore stale audits from older generations
+        if(~ct_switchGen != myGen) { ^nil };
+
+        a = Ndef(\chainA).isPlaying;
+        b = Ndef(\chainB).isPlaying;
+
+        if((a or: { b }).not) {
+            "[CT->MPB] post-switch audit: both stopped -> recovering CURRENT & OptionA".postln;
+            mpb.playCurrent;
+            mpb.enforceExclusiveCurrentOptionA(0.1);
+        };
+        ("[PLAY] A=% B=%".format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
+
+        // release busy flag only after our generation’s audit runs
+        ~ct_switchBusy = false;
+    };
+
+    fadeLocal = fade ? 0.12;
+
+    ensureNextAudible.value;
+    mpb.switchChain(fadeLocal);
+
+    // schedule audit a bit after the fade completes; protect with generation check
+    AppClock.sched(fadeLocal + 0.20, { auditAndFix.value; nil });
+};
+
+
+/*~ct_switchWithRecovery = { arg mpb, gui, fade = 0.12;
+    var ensureNextAudible, auditAndFix, fadeLocal;
+
+    // Ensure NEXT ends with an audible source before switching.
+    ensureNextAudible = {
+        var effNext, last;
+        effNext = mpb.effectiveNext;
+        last = effNext[effNext.size - 1];
+        if(last == \ts0) {
+            "[CT->MPB] guard: NEXT tail \\ts0 -> /setSource/testmelody".postln;
+            ~ct_applyOSCPathToMPB_raw.("/setSource/testmelody", mpb, gui);
+        };
+    };
+
+    // After the crossfade, check A/B; if both false, make CURRENT audible and re-enforce Option A.
+    auditAndFix = {
+        var a, b;
+        a = Ndef(\chainA).isPlaying;
+        b = Ndef(\chainB).isPlaying;
+        if((a or: { b }).not) {
+            "[CT->MPB] post-switch audit: both stopped -> recovering CURRENT & OptionA".postln;
+            mpb.playCurrent;
+            mpb.enforceExclusiveCurrentOptionA(0.1);
+        };
+        ("[PLAY] A=% B=%".format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
+    };
+
+    fadeLocal = fade ? 0.12;
+    ensureNextAudible.value;
+    mpb.switchChain(fadeLocal);
+    AppClock.sched(fadeLocal + 0.20, { auditAndFix.value; nil });
+};*/
+
+// 2) Wrapper adapter: intercept ONLY "/switch"; delegate all other paths to the original.
+~ct_applyOSCPathToMPB = { arg path, mpb, gui;
+    var p, f;
+    p = path.asString;
+    if(p == "/switch") {
+        f = 0.12; // keep your usual fade; adjust if you use a different default
+        ~ct_switchWithRecovery.(mpb, gui, f);
+    }{
+        ~ct_applyOSCPathToMPB_raw.(p, mpb, gui);
+    };
+};
+
+
+~ct_ensureProcessor = { arg keySym;
+    var k;
+    k = keySym.asSymbol;
+
+    Server.default.bind({
+        var defineDelay, defineBypass, defineIdentity;
+
+        defineIdentity = {
+            var make;
+            make = {
+                // pass-through “processor” that keeps stereo and \in.ar(2)
+                // used as a safe fallback for unknown keys
+                Ndef(k, { var sig; sig = \in.ar(2); sig });
+                Ndef(k).ar(2);
+            };
+            if(Ndef(k).source.isNil) { make.value } { Ndef(k).ar(2) };
+        };
+
+        defineDelay = {
+            var make;
+            make = {
+                // simple stereo delay: read from \in.ar(2) → short delay → mix
+                Ndef(\delay, {
+                    var sig, del, time, fb, mix;
+                    sig  = \in.ar(2);
+                    time = 0.25;   // s
+                    fb   = 0.25;
+                    mix  = 0.5;
+                    del  = DelayC.ar(sig + (LocalIn.ar(2) * fb), 1.0, time);
+                    LocalOut.ar(del);
+                    XFade2.ar(sig, del, (mix * 2 - 1).clip(-1, 1))
+                });
+                Ndef(\delay).ar(2);
+            };
+            if(Ndef(\delay).source.isNil) { make.value } { Ndef(\delay).ar(2) };
+        };
+
+        defineBypass = {
+            // A named pass-through “processor” you might use in test chains
+            var make;
+            make = {
+                Ndef(\bypass, { \in.ar(2) });
+                Ndef(\bypass).ar(2);
+            };
+            if(Ndef(\bypass).source.isNil) { make.value } { Ndef(\bypass).ar(2) };
+        };
+
+        // choose per key
+        if(k == \delay) { defineDelay.value }
+        { if(k == \bypass) { defineBypass.value } { defineIdentity.value } };
+    });
+};
+
+
 )
 // audibleSanity.scd
 // v0.2
@@ -240,24 +425,22 @@ Server.default.bind({
 });
 )
 // CT_SafeSmoke_NoDupes.scd
-// v0.1
-// MD 2025-09-18 10:16 BST
-//
+// v0.1.1
+// MD 2025-09-18 11:30 BST
+
 // Purpose:
-// - Safely test CommandTree adapter without duplicate insertions.
-// - Add exactly one \delay to NEXT, then switch once and verify audio.
+// - Safe CommandTree-mimic smoke: add exactly one \delay to NEXT, ensure NEXT source is \testmelody,
+//   then switch once and verify exclusivity with audio.
 // Style:
-// - tilde vars; var-first; lowercase; no server.sync;
+// - tilde vars; var-first in functions/closures; lowercase names; no server.sync;
 // - server ops inside Server.default.bind only when creating/updating Ndefs.
 
 (
 var log, countKey, assertOnce, printChainsShort, ensureAdapterOnce, ensureSource;
-
 log = { arg s; ("[CT] " ++ s).postln };
 countKey = { arg array, key; var c=0; array.do({ arg k; if(k == key) { c = c + 1 } }); c };
 assertOnce = { arg list, key, label;
-    var n;
-    n = countKey.(list, key);
+    var n; n = countKey.(list, key);
     ("[ASSERT] " ++ label ++ " — '" ++ key.asString ++ "' count=" ++ n).postln;
     if(n != 1) { ("[ASSERT] expected exactly 1; got " ++ n).warn };
 };
@@ -275,50 +458,718 @@ ensureAdapterOnce = {
     };
 };
 ensureSource = {
-    // Make sure testmelody exists and is stereo; runner should have done this, but it's cheap
+    // Ensure \testmelody exists (stereo). Cheap and idempotent.
     Server.default.bind({
         if(Ndef(\testmelody).source.isNil) {
             Ndef(\testmelody, {
                 var trig = Impulse.kr(3.2);
-                var seq = Dseq([220, 277.18, 329.63, 392, 329.63, 277.18, 246.94], inf);
+                var seq = Dseq([220,277.18,329.63,392,329.63,277.18,246.94], inf);
                 var f = Demand.kr(trig, 0, seq);
                 var env = Decay2.kr(trig, 0.01, 0.35);
-                var tone = SinOsc.ar(f) * env * 0.25;
-                var pan = ToggleFF.kr(trig).linlin(0, 1, -0.6, 0.6);
-                Pan2.ar(tone, pan)
+                var pan = ToggleFF.kr(trig).linlin(0,1,-0.6,0.6);
+                Pan2.ar(SinOsc.ar(f) * env * 0.25, pan)
             });
         };
         Ndef(\testmelody).ar(2);
     });
 };
 
-// ---- run the safe smoke ----
+// --- run the safe smoke ---
 ensureAdapterOnce.();
 ensureSource.();
 
-// 0) Known baseline: CURRENT audible, NEXT silent (runner already enforces Option A)
+// 0) Baseline visibility
 ~mpb.printChains;
 
-// 1) CLEAN the NEXT chain before we add anything
+// 1) Clean NEXT
 ~mpb.clearChain;
 ~mpb.printChains;
 
-// 2) Apply exactly one path "/add/delay" via adapter (no fallback tokens)
+// 2) Add exactly one delay to NEXT via adapter
 ~ct_applyOSCPathToMPB.("/add/delay", ~mpb, ~gui);
 
-// 3) Inspect NEXT; assert only one 'delay'
-printChainsShort.();
-assertOnce.(~mpb.effectiveNext, \delay, "after /add/delay");
+// 3) Ensure NEXT source is audible BEFORE switching  <<—— added fix
+~ct_applyOSCPathToMPB.("/setSource/testmelody", ~mpb, ~gui);
 
-// 4) Switch once with a short fade; CURRENT should now include \delay
+// Inspect NEXT; assert only one 'delay'
+printChainsShort.();
+assertOnce.(~mpb.effectiveNext, \delay, "after /add/delay + /setSource/testmelody");
+
+
+//fix
+~ct_applyOSCPathToMPB.("/setSource/testmelody", ~mpb, ~gui);
+
+// 4) Switch once with a short fade; CURRENT should now include \delay and end with \testmelody
 ~mpb.switchChain(0.12);
 
-// 5) Post-switch: ensure audio & exclusivity
+// 5) Post-switch checks
 AppClock.sched(0.40, {
     printChainsShort.();
     ("[PLAY] A=% B=%".format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
     nil
 });
+)
+// CT_TokenQueue_Manual_Milestone.scd
+// v0.1.1
+// MD 2025-09-18 15:19 BST
+
+// Purpose:
+// - Prove that MagicPedalboardNew responds to CommandTree-like *tokens* today,
+//   without any Routine/Task runners (no chance of resume errors).
+// - Steps: ensure sources (idempotent) -> apply tokens in order -> single tail verify.
+// Style:
+// - var-first in every function/closure; lowercase names; no server.sync;
+// - server ops inside Server.default.bind only where needed; GUI on AppClock.
+
+(
+var log, ensureSources, guardSwitchAudible, applyPath, verifyTail, ok;
+
+log = { arg s; var t; t = "[TOKENS] " ++ s; t.postln };
+
+// quick guards
+ok = (~mpb.isNil.not) and: { ~gui.isNil.not } and: { ~ct_applyOSCPathToMPB.notNil };
+if(ok.not) {
+    "[TOKENS] Missing ~mpb/~gui or adapter. Run StartHere... and adapter_*.scd first.".warn;
+    ^nil;
+};
+
+// define generated sources if needed (no SoundIn)
+ensureSources = {
+    Server.default.bind({
+        if(Ndef(\testmelody).source.isNil) {
+            Ndef(\testmelody, {
+                var trig, seq, f, env, pan;
+                trig = Impulse.kr(3.2);
+                seq  = Dseq([220,277.18,329.63,392,329.63,277.18,246.94], inf);
+                f    = Demand.kr(trig, 0, seq);
+                env  = Decay2.kr(trig, 0.01, 0.35);
+                pan  = ToggleFF.kr(trig).linlin(0, 1, -0.6, 0.6);
+                Pan2.ar(SinOsc.ar(f) * env * 0.25, pan)
+            });
+        };
+        Ndef(\testmelody).ar(2);
+        Ndef(\ts0, { Silent.ar(2) });  Ndef(\ts0).ar(2);
+    });
+};
+
+// ensure NEXT isn’t silent before switching
+guardSwitchAudible = {
+    var effNext, last;
+    effNext = ~mpb.effectiveNext;
+    last = effNext[effNext.size - 1];
+    if(last == \ts0) {
+        log.("guard: NEXT tail \\ts0 -> injecting /setSource/testmelody before /switch");
+        ~ct_applyOSCPathToMPB.("/setSource/testmelody", ~mpb, ~gui);
+    };
+};
+
+// tiny wrapper around your adapter path applier (for logging)
+applyPath = { arg path;
+    var p;
+    p = path;
+    log.("apply -> " ++ p);
+    ~ct_applyOSCPathToMPB.(p, ~mpb, ~gui);
+};
+
+// verify once after fades
+verifyTail = {
+    AppClock.sched(0.8, {
+        ("[PLAY] A=% B=%"
+            .format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
+        ~mpb.printChains;
+        nil
+    });
+};
+
+// ---- run steps synchronously (no Routine/Task) ----
+ensureSources.();
+
+// 1) Make both chains end with \testmelody once (idempotent), and keep Option A:
+if(~mpb.effectiveCurrent.last != \testmelody) { ~mpb.setSourceCurrent(\testmelody) };
+if(~mpb.effectiveNext   .last != \testmelody) { ~mpb.setSource(\testmelody) };
+~mpb.enforceExclusiveCurrentOptionA(0.1);
+
+// 2) Mimic CommandTree tokens via canonical adapter paths:
+
+// ["insert","delay"]  -> "/add/delay"  (applies to NEXT)
+applyPath.("/add/delay");
+
+// ["switch"] -> "/switch"  (guard ensures audible NEXT)
+guardSwitchAudible.();
+applyPath.("/switch");
+
+// ["bypass","delay","on"]  -> "/bypass/delay/on"  (acts on NEXT chain in your adapter semantics)
+applyPath.("/bypass/delay/on");
+
+// ["bypass","delay","off"] -> "/bypass/delay/off"
+applyPath.("/bypass/delay/off");
+
+// ["switch"] -> "/switch" (again)
+guardSwitchAudible.();
+applyPath.("/switch");
+
+// 3) One final verification print (PLAY flags + chains)
+verifyTail.();
+)
+// CT_TokenQueue_Milestone_ClockChain.scd
+// v0.3.0
+// MD 2025-09-18 15:08 BST
+
+// Purpose:
+// - Demonstrate (audibly & with logs) that MagicPedalboardNew responds to CommandTree-like
+//   *token* queues today, sequenced without Routine/Task (AppClock-only, chain scheduling).
+// - Flow: ensure sources -> load adapter via absolute path -> prime sources -> token playlist -> verify.
+// Style:
+// - var-first in every function/closure; lowercase names; no server.sync;
+// - all server ops inside Server.default.bind; GUI ops on AppClock;
+// - NodeProxy connections remain inside class rebuilds using the exact <<> operator.
+
+(
+var here, loadLocal, log, need, ensureSources, tokensToPath, isNextSilent, guardSwitchAudible;
+var applyOneTokens, startClockChain, stopClockChain, verifyAtEnd, startDemo;
+var playlist, gap, gen;
+
+// --- path helper: load sibling files from this script's folder ---
+here = PathName(thisProcess.nowExecutingPath).pathOnly;
+loadLocal = { arg leafName;
+    var full;
+    full = here +/+ leafName;
+    full.load;
+};
+
+// --- logging helper ---
+log = { arg s;
+    var str;
+    str = "[TOKENS] " ++ s;
+    str.postln;
+};
+
+// --- precondition guard (requires bring-up so ~mpb / ~gui exist) ---
+need = {
+    var ok;
+    ok = (~mpb.isNil.not) and: { ~gui.isNil.not };
+    if(ok.not) {
+        "[TOKENS] ~mpb/~gui are nil. Run StartHere_CleanBoot_OneWindow_BringUp.scd first.".warn;
+    };
+    ok
+};
+
+// --- ensure generated sources exist (no SoundIn) ---
+ensureSources = {
+    var define;
+    define = {
+        var made;
+        made = false;
+        if(Ndef(\testmelody).source.isNil) {
+            Ndef(\testmelody, {
+                var trig, seq, f, env, pan;
+                trig = Impulse.kr(3.2);
+                seq  = Dseq([220,277.18,329.63,392,329.63,277.18,246.94], inf);
+                f    = Demand.kr(trig, 0, seq);
+                env  = Decay2.kr(trig, 0.01, 0.35);
+                pan  = ToggleFF.kr(trig).linlin(0, 1, -0.6, 0.6);
+                Pan2.ar(SinOsc.ar(f) * env * 0.25, pan)
+            });
+            made = true;
+        };
+        Ndef(\testmelody).ar(2);
+        Ndef(\ts0, { Silent.ar(2) });  Ndef(\ts0).ar(2);
+        made
+    };
+    Server.default.bind({ define.value; });
+};
+
+// --- load adapter robustly (absolute path) ---
+if(~ct_applyOSCPathToMPB.isNil) {
+    loadLocal.value("adapter_CommandTree_to_MagicPedalboard.scd");
+    log.("adapter loaded");
+} {
+    log.("adapter already present");
+};
+
+// --- token -> canonical path mapping (what the adapter expects) ---
+tokensToPath = { arg tokensIn;
+    var tokens, verb, args, result, onOff;
+    tokens = tokensIn.collect({ arg t; t.asString });
+    if(tokens.size <= 0) { ^nil };
+    verb = tokens[0].toLower;
+    args = if(tokens.size > 1) { tokens.copyRange(1, tokens.size - 1) } { [] };
+    result = nil;
+
+    if(verb == "insert" or: { verb == "add" }) {
+        if(args.size >= 1) { result = "/add/" ++ args[0] };
+    }{
+        if(verb == "bypass") {
+            onOff = if(args.size >= 2) { args[1].toLower } { "on" };
+            onOff = if(#["on","off","true","false","1","0"].includes(onOff)) {
+                if((onOff == "true") or: { onOff == "1" }) { "on" } { onOff }
+            } { "on" };
+            if(args.size >= 1) { result = "/bypass/" ++ args[0] ++ "/" ++ onOff };
+        }{
+            if(verb == "setsource" or: { verb == "source" } or: { verb == "setsrc" }) {
+                if(args.size >= 1) { result = "/setSource/" ++ args[0] };
+            }{
+                if(verb == "removeat") {
+                    if(args.size >= 1) { result = "/removeAt/" ++ args[0] };
+                }{
+                    if(verb == "swap") {
+                        if(args.size >= 2) { result = "/swap/" ++ args[0] ++ "/" ++ args[1] };
+                    }{
+                        if(verb == "switch" or: { verb == "commit" }) {
+                            result = "/switch";
+                        }{
+                            result = nil;
+                        };
+                    };
+                };
+            };
+        };
+    };
+    ^result
+};
+
+// --- guard so /switch never lands on a silent NEXT (\ts0 tail) ---
+isNextSilent = {
+    var effNext, last;
+    effNext = ~mpb.effectiveNext;
+    last = effNext[effNext.size - 1];
+    ^(last == \ts0)
+};
+
+guardSwitchAudible = {
+    var needed;
+    needed = isNextSilent.value;
+    if(needed) {
+        log.("NEXT ends with \\ts0; injecting /setSource/testmelody before /switch");
+        ~ct_applyOSCPathToMPB.("/setSource/testmelody", ~mpb, ~gui);
+    };
+};
+
+// --- apply one token step via the adapter ---
+applyOneTokens = { arg tokens;
+    var path;
+    path = tokensToPath.value(tokens);
+    if(path.isNil) {
+        log.("unmapped tokens: " ++ tokens.asString);
+        ^nil;
+    };
+    if(path == "/switch") { guardSwitchAudible.value };
+    log.("apply " ++ tokens.asString ++ "  -> " ++ path);
+    ~ct_applyOSCPathToMPB.(path, ~mpb, ~gui);
+};
+
+// --- STOP any previous chain by bumping a generation counter ---
+stopClockChain = {
+    var old;
+    old = ~ctq_gen ? 0;
+    ~ctq_gen = old + 1;
+    log.("chain stopped (gen=" ++ ~ctq_gen ++ ")");
+};
+
+// --- Start a playlist using AppClock chaining; no Routine/Task involved ---
+startClockChain = { arg listOfTokenLists, gapSeconds = 0.6;
+    var startGen, total, stepFn, scheduleNext, index;
+
+    // bump generation to cancel older scheduled callbacks
+    stopClockChain.value;
+
+    startGen = ~ctq_gen;
+    total = listOfTokenLists.size;
+    index = 0;
+
+    stepFn = {
+        var tokens, stillMine;
+        tokens = listOfTokenLists[index];
+        stillMine = (~ctq_gen == startGen);
+        if(stillMine.not) { ^nil }; // cancelled
+
+        applyOneTokens.value(tokens);
+
+        index = index + 1;
+        if(index < total) {
+            scheduleNext.value;
+        }{
+            log.("done.");
+        };
+    };
+
+    scheduleNext = {
+        var delay;
+        delay = gapSeconds ? 0.6;
+        AppClock.sched(delay, {
+            var stillMine;
+            stillMine = (~ctq_gen == startGen);
+            if(stillMine) { stepFn.value } { nil };
+        });
+    };
+
+    // kick off immediately
+    AppClock.sched(0.0, {
+        var stillMine;
+        stillMine = (~ctq_gen == startGen);
+        if(stillMine) { stepFn.value } { nil };
+    });
+
+    ^startGen
+};
+
+// --- verify tail ---
+verifyAtEnd = {
+    var a, b;
+    a = Ndef(\chainA).isPlaying;
+    b = Ndef(\chainB).isPlaying;
+    ("[PLAY] A=% B=%".format(a, b)).postln;
+    ~mpb.printChains;
+};
+
+// --- end-to-end run ---
+startDemo = {
+    var ok, runGen, tailDelay;
+    ok = need.value;
+    if(ok.not) { ^nil };
+
+    ensureSources.value;
+
+    // For today: both chains end with \testmelody; NEXT remains silent at sink (Option A).
+    ~mpb.setSourceCurrent(\testmelody);
+    ~mpb.setSource(\testmelody);
+    ~mpb.enforceExclusiveCurrentOptionA(0.1);
+
+    // Example playlist
+    playlist = [
+        ["insert","delay"],
+        ["switch"],
+        ["bypass","delay","on"],
+        ["bypass","delay","off"],
+        ["switch"]
+    ];
+    gap = 0.60;
+
+    runGen = startClockChain.value(playlist, gap);
+
+    // verify near the end; computed tail = steps * gap + small margin
+    tailDelay = playlist.size * gap + 0.9;
+    AppClock.sched(tailDelay, {
+        var stillMine;
+        stillMine = (~ctq_gen == runGen);
+        if(stillMine) { verifyAtEnd.value };
+        nil
+    });
+};
+
+// --- go ---
+startDemo.value;
+)
+// CT_TokenQueueHarness.scd
+// v0.1.1
+// MD 2025-09-18 13:56 BST
+
+/*
+Purpose
+- Minimal harness that accepts CommandTree-like token arrays (e.g. ["insert","delay"])
+  and maps them to canonical OSC-style paths understood by your existing adapter
+  (~ct_applyOSCPathToMPB). Adds a guard so "/switch" never lands on a silent NEXT.
+
+Style
+- tilde vars allowed at top level.
+- var-first in every function/closure; lowercase method names.
+- no server.sync; all server ops inside Server.default.bind.
+- This file does not manipulate Ndefs directly; MagicPedalboardNew handles audio and <<>.
+*/
+
+(
+// Public factory: ~ctq_makeHarness.(mpb, gui, secondsBetween)
+// Returns an IdentityDictionary with keys:
+//  - \applyOneTokens : { |tokens| ... }         // tokens = ["insert","delay"] etc.
+//  - \runPlaylist    : { |listOfTokenLists, gapSeconds| ... }
+//  - \tokensToPath   : { |tokens| ... }         // mapping only
+//  - \stop           : { ... }                  // stop current run (if any)
+
+var makeHarness;
+makeHarness = { arg mpb, gui, secondsBetween = 0.5;
+    var state, log, ensureAdapter, tokensToPath, isNextSilent, guardSwitchAudible;
+    var applyOneTokens, runPlaylist, stop, runner;
+
+    log = { arg s;
+        var msg;
+        msg = "[CTQ] " ++ s;
+        msg.postln;
+    };
+
+    ensureAdapter = {
+        var loadedAlready;
+        loadedAlready = (~ct_applyOSCPathToMPB.notNil);
+        if(loadedAlready.not) {
+            "adapter_CommandTree_to_MagicPedalboard.scd".loadRelative;
+            log.("adapter loaded");
+        }{
+            log.("adapter already present");
+        };
+    };
+
+    tokensToPath = { arg tokensIn;
+        var tokens, verb, args, result, lowerOnOff;
+        tokens = tokensIn.collect({ arg t; t.asString });
+        if(tokens.size <= 0) { ^nil };
+        verb = tokens[0].toLower;
+        args = if(tokens.size > 1) { tokens.copyRange(1, tokens.size - 1) } { [] };
+        result = nil;
+
+        if(verb == "insert" or: { verb == "add" }) {
+            if(args.size >= 1) { result = "/add/" ++ args[0] };
+        }{
+            if(verb == "bypass") {
+                if(args.size >= 1) {
+                    lowerOnOff = if(args.size >= 2) { args[1].toLower } { "on" };
+                    lowerOnOff = (["on","off","true","false","1","0"].includes(lowerOnOff)).if({
+                        if((lowerOnOff == "true") or: { lowerOnOff == "1" }) { "on" } { lowerOnOff }
+                    },{
+                        "on"
+                    });
+                    result = "/bypass/" ++ args[0] ++ "/" ++ lowerOnOff;
+                };
+            }{
+                if(verb == "setsource" or: { verb == "source" } or: { verb == "setsrc" }) {
+                    if(args.size >= 1) { result = "/setSource/" ++ args[0] };
+                }{
+                    if(verb == "switch" or: { verb == "commit" }) {
+                        result = "/switch";
+                    }{
+                        if(verb == "removeat") {
+                            if(args.size >= 1) { result = "/removeAt/" ++ args[0] };
+                        }{
+                            if(verb == "swap") {
+                                if(args.size >= 2) { result = "/swap/" ++ args[0] ++ "/" ++ args[1] };
+                            }{
+                                result = nil;
+                            };
+                        };
+                    };
+                };
+            };
+        };
+        ^result;
+    };
+
+    isNextSilent = {
+        var effNext, last;
+        effNext = mpb.effectiveNext;
+        last = effNext[effNext.size - 1];
+        ^(last == \ts0);
+    };
+
+    guardSwitchAudible = {
+        var needed;
+        needed = isNextSilent.();
+        if(needed) {
+            log.("NEXT ends with \\ts0; injecting /setSource/testmelody before /switch");
+            ~ct_applyOSCPathToMPB.("/setSource/testmelody", mpb, gui);
+        };
+    };
+
+    applyOneTokens = { arg tokens;
+        var path;
+        path = tokensToPath.(tokens);
+        if(path.isNil) {
+            log.("unmapped tokens: " ++ tokens.asString);
+            ^nil;
+        };
+        if(path == "/switch") { guardSwitchAudible.() };
+        ~ct_applyOSCPathToMPB.(path, mpb, gui);
+    };
+
+    runPlaylist = { arg listOfTokenLists, gapSeconds;
+        var gapLocal, routineLocal;
+        gapLocal = gapSeconds ? secondsBetween;
+        routineLocal = Routine({
+            var i, step;
+            i = 0;
+            while({ i < listOfTokenLists.size }, {
+                step = listOfTokenLists[i];
+                log.("apply " ++ step.asString);
+                applyOneTokens.(step);
+                gapLocal.wait;
+                i = i + 1;
+            });
+            log.("done.");
+        });
+        runner = routineLocal.play(AppClock);
+        ^runner;
+    };
+
+    stop = {
+        if(runner.notNil) { runner.stop; runner = nil };
+        log.("stopped.");
+    };
+
+    ensureAdapter.();
+    state = IdentityDictionary[
+        \applyOneTokens -> applyOneTokens,
+        \runPlaylist    -> runPlaylist,
+        \tokensToPath   -> tokensToPath,
+        \stop           -> stop
+    ];
+    ^state;
+};
+
+~ctq_makeHarness = makeHarness;
+)
+// CTQ_HardStop_All_Runners.scd
+// v0.1.1
+// MD 2025-09-18 15:18 BST
+
+// Purpose:
+// - Stop any leftover Routine/Task and cancel any pending AppClock chain (generation bump).
+// Style:
+// - var-first; lowercase; no server.sync.
+
+(
+var hadRunner, hadTask, oldGen;
+hadRunner = (~ctq_runner.notNil) and: { ~ctq_runner.isPlaying };
+hadTask   = (~ctq_task.notNil)   and: { ~ctq_task.isPlaying };
+
+if(hadRunner) { ~ctq_runner.stop };
+if(hadTask)   { ~ctq_task.stop };
+
+~ctq_runner = nil;
+~ctq_task   = nil;
+
+oldGen = ~ctq_gen ? 0;
+~ctq_gen = oldGen + 1;
+
+("[TOKENS] HARD STOP — runner=% task=% gen=%"
+    .format(hadRunner, hadTask, ~ctq_gen)).postln;
+)
+// CTQ_MinHarness_Inline.scd
+// v0.1.0
+// MD 2025-09-18 14:05 BST
+
+/*Purpose
+- Minimal, reliable inline harness to drive MagicPedalboardNew from CommandTree-like token queues
+  without relying on a returned dictionary. Good for today's milestone demo.
+Style
+- tilde vars; var-first in every function/closure; lowercase method names; no server.sync;
+  GUI on AppClock; Ndef connections happen inside class code with exact <<> operator.*/
+
+
+(
+// 0) Preconditions and adapter
+var need;
+
+need = {
+    if(~mpb.isNil or: { ~gui.isNil }) {
+        "[CTQ] ~mpb/~gui are nil. Run StartHere_CleanBoot_OneWindow_BringUp.scd first.".warn;
+        ^false
+    }; ^true
+};
+
+if(need.().not) { ^nil };
+
+// load adapter once (defines ~ct_applyOSCPathToMPB)
+if(~ct_applyOSCPathToMPB.isNil) {
+    "adapter_CommandTree_to_MagicPedalboard.scd".loadRelative;
+    "[CTQ] adapter loaded".postln;
+} {
+    "[CTQ] adapter already present".postln;
+};
+
+// 1) Token → path mapper (safe subset for today)
+~ctq_tokensToPath = { arg tokensIn;
+    var tokens, verb, args, lowerOnOff, result;
+    tokens = tokensIn.collect({ arg t; t.asString });
+    if(tokens.size <= 0) { ^nil };
+    verb = tokens[0].toLower;
+    args = if(tokens.size > 1) { tokens.copyRange(1, tokens.size - 1) } { [] };
+    result = nil;
+
+    if(verb == "insert" or: { verb == "add" }) {
+        if(args.size >= 1) { result = "/add/" ++ args[0] };
+    } {
+        if(verb == "bypass") {
+            if(args.size >= 1) {
+                lowerOnOff = if(args.size >= 2) { args[1].toLower } { "on" };
+                lowerOnOff = (["on","off","true","false","1","0"].includes(lowerOnOff)).if({
+                    if((lowerOnOff == "true") or: { lowerOnOff == "1" }) { "on" } { lowerOnOff }
+                }, { "on" });
+                result = "/bypass/" ++ args[0] ++ "/" ++ lowerOnOff;
+            };
+        } {
+            if(verb == "setsource" or: { verb == "source" } or: { verb == "setsrc" }) {
+                if(args.size >= 1) { result = "/setSource/" ++ args[0] };
+            } {
+                if(verb == "switch" or: { verb == "commit" }) {
+                    result = "/switch";
+                } {
+                    if(verb == "removeat") {
+                        if(args.size >= 1) { result = "/removeAt/" ++ args[0] };
+                    } {
+                        if(verb == "swap") {
+                            if(args.size >= 2) { result = "/swap/" ++ args[0] ++ "/" ++ args[1] };
+                        } {
+                            result = nil; // unmapped today
+                        };
+                    };
+                };
+            };
+        };
+    };
+    ^result;
+};
+
+// 2) Guard so /switch never lands on \ts0
+~ctq_guardSwitchAudible = {
+    var effNext, last;
+    effNext = ~mpb.effectiveNext;
+    last = effNext[effNext.size - 1];
+    if(last == \ts0) {
+        "[CTQ] NEXT ends with \\ts0; injecting /setSource/testmelody before /switch".postln;
+        ~ct_applyOSCPathToMPB.("/setSource/testmelody", ~mpb, ~gui);
+    };
+};
+
+// 3) Apply a single token array
+~ctq_applyOneTokens = { arg tokens;
+    var path;
+    path = ~ctq_tokensToPath.(tokens);
+    if(path.isNil) {
+        ("[CTQ] unmapped tokens: " ++ tokens.asString).postln; ^nil
+    };
+    if(path == "/switch") { ~ctq_guardSwitchAudible.() };
+    ("[CTQ] apply " ++ tokens.asString ++ " -> " ++ path).postln;
+    ~ct_applyOSCPathToMPB.(path, ~mpb, ~gui);
+};
+
+// 4) Run a playlist of token arrays with a gap (Routine on AppClock)
+~ctq_runPlaylist = { arg listOfTokenLists, gapSeconds = 0.6;
+    var routineLocal, gap;
+    gap = gapSeconds ? 0.6;
+    routineLocal = Routine({
+        var i;
+        i = 0;
+        while({ i < listOfTokenLists.size }, {
+            ~ctq_applyOneTokens.( listOfTokenLists[i] );
+            gap.wait;
+            i = i + 1;
+        });
+        "[CTQ] done.".postln;
+    });
+    routineLocal.play(AppClock);
+    ^routineLocal
+};
+
+// 5) Quick prime (today we want audible switches using \testmelody)
+~ctq_primeSources = {
+    ~mpb.setSourceCurrent(\testmelody);
+    ~mpb.setSource(\testmelody);
+    ~mpb.enforceExclusiveCurrentOptionA(0.1);
+    ~mpb.printChains;
+    AppClock.sched(0.25, {
+        ("[PLAY] A=% B=%".format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
+        nil
+    });
+};
+
+"[CTQ] inline harness ready".postln;
 )
 // demo_apply_after_fix.scd
 // v0.1
@@ -643,6 +1494,118 @@ indexCounter = 0; totalCount = playlist.size;
     log.("playlist reset.");
 };
 )
+// Demo_CommandTree_TokenQueues.scd
+// v0.1.1
+// MD 2025-09-18 13:56 BST
+
+/*
+Purpose
+- Demonstrate MagicPedalboardNew responding to CommandTree-like token queues, via
+  CT_TokenQueueHarness (tokens -> adapter paths -> pedalboard).
+
+Style
+- Requires that StartHere_CleanBoot_OneWindow_BringUp.scd has run (so ~mpb, ~gui exist).
+- var-first; lowercase; no server.sync; server ops inside Server.default.bind; GUI on AppClock.
+*/
+
+(
+var ensureSources, primeSources, gap, h, playlistA, playlistB, after;
+
+if(~mpb.isNil or: { ~gui.isNil }) {
+    "[DEMO] ~mpb/~gui are nil. Run StartHere_CleanBoot_OneWindow_BringUp.scd first.".warn;
+    ^nil;
+};
+
+ensureSources = {
+    Server.default.bind({
+        if(Ndef(\testmelody).source.isNil) {
+            Ndef(\testmelody, {
+                var trig, seq, f, env, pan;
+                trig = Impulse.kr(3.2);
+                seq  = Dseq([220,277.18,329.63,392,329.63,277.18,246.94], inf);
+                f    = Demand.kr(trig, 0, seq);
+                env  = Decay2.kr(trig, 0.01, 0.35);
+                pan  = ToggleFF.kr(trig).linlin(0,1,-0.6,0.6);
+                Pan2.ar(SinOsc.ar(f) * env * 0.25, pan)
+            });
+        };
+        Ndef(\testmelody).ar(2);
+        Ndef(\ts0, { Silent.ar(2) }); Ndef(\ts0).ar(2);
+    });
+};
+
+primeSources = {
+    ~mpb.setSourceCurrent(\testmelody);
+    ~mpb.setSource(\testmelody);
+    ~mpb.enforceExclusiveCurrentOptionA(0.1);
+    ~mpb.printChains;
+};
+
+gap = 0.60;
+"CT_TokenQueueHarness.scd".loadRelative;
+h = ~ctq_makeHarness.(~mpb, ~gui, gap);
+
+// Example token playlists
+playlistA = [
+    ["insert","delay"],
+    ["switch"]
+];
+
+playlistB = [
+    ["bypass","delay","on"],
+    ["bypass","delay","off"],
+    ["switch"]
+];
+
+ensureSources.();
+primeSources.();
+
+h[\runPlaylist].(playlistA, gap);
+after = (playlistA.size * gap + 1.0).max(1.0);
+AppClock.sched(after, {
+    h[\runPlaylist].(playlistB, gap);
+    nil
+});
+)
+// Demo_Install_MinProcessors.scd
+// v0.1.0
+// MD 2025-09-18 11:58 BST
+
+/* Purpose
+   - Install a minimal, safe stereo \delay processor so chains like
+     [chainX, delay, testmelody] are AUDIBLE.
+   - Generated audio only; processors read from \in.ar(2); no SoundIn.
+   - Idempotent; safe to re-run.
+
+   Style
+   - var-first in every function/closure; lowercase method names.
+   - No server.sync; wrap server ops in Server.default.bind.
+   - JITLib connections elsewhere MUST use Ndef(left) <<> Ndef(right).
+*/
+
+(
+var installDelay;
+installDelay = {
+    Server.default.bind({
+        // Simple feedback delay. Reads from \in.ar(2) per project policy.
+        Ndef(\delay, {
+            var inSig, maxDelay, time, fb, mix, wet;
+            inSig    = \in.ar(2);              // <- policy: processors read from \in.ar(defaultNumChannels)
+            maxDelay = 1.0;
+            time     = (\time.kr(0.25)).clip(0.0, maxDelay);
+            fb       = (\fb.kr(0.25)).clip(0.0, 0.95);
+            mix      = (\mix.kr(0.35)).clip(0.0, 1.0);
+            wet      = DelayC.ar(inSig + (LocalIn.ar(2) * fb), maxDelay, time);
+            LocalOut.ar(wet);
+            XFade2.ar(inSig, wet, (mix * 2) - 1) * 0.9
+        });
+        // Pin stereo/audio-rate bus shape (authoritative shape)
+        Ndef(\delay).mold(2, \audio);
+    });
+    "[MINPROC] Installed \\delay (stereo)".postln;
+};
+installDelay.();
+)
 // Diag_BusChannel_Map.scd
 // v0.1
 // MD 20250917-1154
@@ -770,7 +1733,7 @@ Server.default.bind({
     Ndef(\chainA).play;
 });
 
-log.("Manual patch: chainA <<>> toneTest; chainA.play — you should hear steady tone now.");
+log.("Manual patch: chainA <<> toneTest; chainA.play — you should hear steady tone now.");
 )
 // diag_more_state.scd
 // v0.1
@@ -1679,6 +2642,197 @@ Server.default.bind({
     true
 };
 )
+// Inline_CT_TokenSmoke.scd
+// v0.1.2
+// MD 2025-09-18 14:12 BST
+
+// Purpose:
+// - Demonstrate that MagicPedalboardNew responds to CommandTree-shaped *token* queues today
+//   without external file loads (audible and logged).
+// - Flow: ensure sources -> tiny token-harness -> prime sources -> apply tokens -> verify.
+// Style:
+// - var-first in every function/closure; lowercase names; no server.sync;
+// - all server ops inside Server.default.bind; GUI ops on AppClock; NodeProxy connections
+//   remain inside class rebuilds using the exact <<> operator.
+
+(
+var log, need, ensureSources, tokensToPath, isNextSilent, guardSwitchAudible,
+    applyOneTokens, runPlaylist, doRun, playlist, gap;
+
+// --- logging helper (var-first inside) ---
+log = { arg s;
+    var str;
+    str = "[TOKENS] " ++ s;
+    str.postln;
+};
+
+// --- precondition guard (var-first inside) ---
+need = {
+    var ok;
+    ok = (~mpb.isNil.not) and: { ~gui.isNil.not };
+    if(ok.not) {
+        "[TOKENS] ~mpb/~gui are nil. Run StartHere_CleanBoot_OneWindow_BringUp.scd first.".warn;
+    };
+    ok
+};
+
+// --- ensure generated sources exist (no SoundIn) ---
+ensureSources = {
+    var define;
+    define = {
+        var made;
+        made = false;
+        if(Ndef(\testmelody).source.isNil) {
+            Ndef(\testmelody, {
+                var trig, seq, f, env, pan;
+                trig = Impulse.kr(3.2);
+                seq  = Dseq([220,277.18,329.63,392,329.63,277.18,246.94], inf);
+                f    = Demand.kr(trig, 0, seq);
+                env  = Decay2.kr(trig, 0.01, 0.35);
+                pan  = ToggleFF.kr(trig).linlin(0, 1, -0.6, 0.6);
+                Pan2.ar(SinOsc.ar(f) * env * 0.25, pan)
+            });
+            made = true;
+        };
+        Ndef(\testmelody).ar(2);
+        Ndef(\ts0, { Silent.ar(2) });  Ndef(\ts0).ar(2);
+        made
+    };
+    Server.default.bind({ define.value; });
+};
+
+// --- token -> canonical path mapping understood by the adapter ---
+tokensToPath = { arg tokensIn;
+    var tokens, verb, args, result, onOff;
+    tokens = tokensIn.collect({ arg t; t.asString });
+    if(tokens.size <= 0) { ^nil };
+    verb = tokens[0].toLower;
+    args = if(tokens.size > 1) { tokens.copyRange(1, tokens.size - 1) } { [] };
+    result = nil;
+
+    if(verb == "insert" or: { verb == "add" }) {
+        if(args.size >= 1) { result = "/add/" ++ args[0] };
+    }{
+        if(verb == "bypass") {
+            onOff = if(args.size >= 2) { args[1].toLower } { "on" };
+            onOff = if(#["on","off","true","false","1","0"].includes(onOff)) {
+                if((onOff == "true") or: { onOff == "1" }) { "on" } { onOff }
+            } { "on" };
+            if(args.size >= 1) { result = "/bypass/" ++ args[0] ++ "/" ++ onOff };
+        }{
+            if(verb == "setsource" or: { verb == "source" } or: { verb == "setsrc" }) {
+                if(args.size >= 1) { result = "/setSource/" ++ args[0] };
+            }{
+                if(verb == "removeat") {
+                    if(args.size >= 1) { result = "/removeAt/" ++ args[0] };
+                }{
+                    if(verb == "swap") {
+                        if(args.size >= 2) { result = "/swap/" ++ args[0] ++ "/" ++ args[1] };
+                    }{
+                        if(verb == "switch" or: { verb == "commit" }) {
+                            result = "/switch";
+                        }{
+                            result = nil;
+                        };
+                    };
+                };
+            };
+        };
+    };
+    ^result
+};
+
+// --- guard so /switch never lands on a silent NEXT (\ts0 tail) ---
+isNextSilent = {
+    var effNext, last;
+    effNext = ~mpb.effectiveNext;
+    last = effNext[effNext.size - 1];
+    ^(last == \ts0)
+};
+
+guardSwitchAudible = {
+    var needed;
+    needed = isNextSilent.value;
+    if(needed) {
+        log.("NEXT ends with \\ts0; injecting /setSource/testmelody before /switch");
+        if(~ct_applyOSCPathToMPB.notNil) {
+            ~ct_applyOSCPathToMPB.("/setSource/testmelody", ~mpb, ~gui);
+        }{
+            "[TOKENS] adapter missing; cannot auto-fix source".warn;
+        };
+    };
+};
+
+// --- apply one token step via your existing adapter ---
+applyOneTokens = { arg tokens;
+    var path;
+    path = tokensToPath.value(tokens);
+    if(path.isNil) {
+        log.("unmapped tokens: " ++ tokens.asString);
+        ^nil;
+    };
+    if(path == "/switch") { guardSwitchAudible.value };
+    if(~ct_applyOSCPathToMPB.notNil) {
+        log.("apply " ++ tokens.asString ++ "  -> " ++ path);
+        ~ct_applyOSCPathToMPB.(path, ~mpb, ~gui);
+    }{
+        ("[TOKENS] adapter missing; would apply " ++ path).warn;
+    };
+};
+
+// --- run a playlist of token steps with a gap (AppClock) ---
+runPlaylist = { arg listOfTokenLists, gapSeconds = 0.6;
+    var rt;
+    rt = Routine({
+        var i;
+        i = 0;
+        while({ i < listOfTokenLists.size }, {
+            applyOneTokens.value(listOfTokenLists[i]);
+            gapSeconds.wait;
+            i = i + 1;
+        });
+        log.("done.");
+    }).play(AppClock);
+    ^rt
+};
+
+// --- end-to-end demo: prime sources (today), run, verify ---
+doRun = {
+    var verify;
+    gap = 0.60;
+
+    // For today: both chains end with \testmelody; NEXT stays silent at sink (Option A).
+    ~mpb.setSourceCurrent(\testmelody);
+    ~mpb.setSource(\testmelody);
+    ~mpb.enforceExclusiveCurrentOptionA(0.1);
+
+    // Example playlist: insert delay -> switch -> bypass on -> bypass off -> switch back
+    playlist = [
+        ["insert","delay"],
+        ["switch"],
+        ["bypass","delay","on"],
+        ["bypass","delay","off"],
+        ["switch"]
+    ];
+
+    runPlaylist.value(playlist, gap);
+
+    verify = {
+        var a, b;
+        a = Ndef(\chainA).isPlaying; b = Ndef(\chainB).isPlaying;
+        ("[PLAY] A=% B=%".format(a, b)).postln;
+        ~mpb.printChains;
+    };
+
+    AppClock.sched(playlist.size * gap + 0.9, { verify.value; nil });
+};
+
+// --- go ---
+if(need.value) {
+    ensureSources.value;
+    doRun.value;
+};
+)
 // fix_current_only_now.scd
 // v0.1
 // MD 20250916-1007
@@ -1720,7 +2874,7 @@ define = { arg key, func; lib.register(key, func) };
 // Sources
 define.(\ts0, {
     var inputSignal;
-    inputSignal = SoundIn.ar((0..1));
+    inputSignal = Silent.ar((0..1));
     inputSignal * 1.0
 });
 
@@ -1922,14 +3076,85 @@ createNew = {
 closeExisting.value;
 createNew.value;
 )
-// meters_preinstall_busmeters.scd
-// v0.1
-// MD 20250916-1051
+// Milestone_QueueResponse.scd
+// v0.1.1
+// MD 2025-09-18 13:56 BST
+/*
+Purpose
+- One-button milestone demo: build the token-harness, run a short token playlist,
+  and print concise checks. Use after bring-up.
+
+Style
+- var-first; lowercase; no server.sync; GUI on AppClock; audio graph owned by class code.
+*/
 
 (
-SynthDef(\busMeterA, { |inbus=0, numch=2| var sig = In.ar(inbus, numch); 0 }).add;
-SynthDef(\busMeterB, { |inbus=0, numch=2| var sig = In.ar(inbus, numch); 0 }).add;
-"[Meters] Installed stub SynthDefs: busMeterA/B.".postln;
+var log, need, ensureSources, verify, run;
+
+log = { arg s; ("[MILESTONE] " ++ s).postln };
+
+need = {
+    var ok;
+    ok = (~mpb.notNil and: { ~gui.notNil });
+    if(ok.not) { "[MILESTONE] ~mpb/~gui are nil. Run the bring-up script first.".warn };
+    ^ok;
+};
+
+ensureSources = {
+    Server.default.bind({
+        if(Ndef(\testmelody).source.isNil) {
+            Ndef(\testmelody, {
+                var trig, seq, f, env, pan;
+                trig = Impulse.kr(3.2);
+                seq  = Dseq([220,277.18,329.63,392,329.63,277.18,246.94], inf);
+                f    = Demand.kr(trig, 0, seq);
+                env  = Decay2.kr(trig, 0.01, 0.35);
+                pan  = ToggleFF.kr(trig).linlin(0,1,-0.6,0.6);
+                Pan2.ar(SinOsc.ar(f) * env * 0.25, pan)
+            });
+        };
+        Ndef(\testmelody).ar(2);
+        Ndef(\ts0, { Silent.ar(2) }); Ndef(\ts0).ar(2);
+    });
+};
+
+verify = { arg tag = "now";
+    var aPlaying, bPlaying;
+    aPlaying = Ndef(\chainA).isPlaying;
+    bPlaying = Ndef(\chainB).isPlaying;
+    ("[PLAY] A=% B=%".format(aPlaying, bPlaying)).postln;
+    ~mpb.printChains;
+    ("[CHECK] " ++ tag).postln;
+};
+
+run = {
+    var gap, h, playlist;
+    gap = 0.60;
+
+    "CT_TokenQueueHarness.scd".loadRelative;
+    ~ctq = ~ctq_makeHarness.(~mpb, ~gui, gap);
+
+    ~mpb.setSourceCurrent(\testmelody);
+    ~mpb.setSource(\testmelody);
+    ~mpb.enforceExclusiveCurrentOptionA(0.1);
+    verify.("after prime");
+
+    playlist = [
+        ["insert","delay"],
+        ["switch"],
+        ["bypass","delay","on"],
+        ["bypass","delay","off"],
+        ["switch"]
+    ];
+
+    ~ctq[\runPlaylist].(playlist, gap);
+    AppClock.sched(playlist.size * gap + 0.8, { verify.("after playlist"); nil });
+};
+
+if(need.()) {
+    ensureSources.();
+    run.();
+};
 )
 (
 // mpb_exclusiveReset_now.scd
@@ -1950,203 +3175,6 @@ reportStatus = {
 ~mpb.reset;
 reportStatus.();
 )
-/* MPB_Scenarios_v6.scd — SuperCollider-only (no Markdown)
-   NO MIC TODAY: ts0 is overridden to an internal test source.
-   Test sources are time-varying so delay/reverb are obvious.
-   MD 20250915
-*/
-
-// [0] Prep — boot server
-Server.default.boot;
-
-// [0.1] (Optional hard block) Disable *all* audio input at driver level, then reboot.
-// Comment out if you don't want to reboot.
-// (
-// Server.default.quit;
-// Server.default.options.numInputBusChannels = 0;  // hard disable input
-// Server.default.options.numOutputBusChannels = 2;
-// Server.default.reboot;
-// )
-
-// [0.2] Define musical test sources and effects (idempotent)
-
-// Helper to define an Ndef only if it isn't already defined
-(
-var ensureProxyFunc;
-
-ensureProxyFunc = { arg key, func;
-    var hasSource, canRun;
-    hasSource = Ndef(key).source.notNil;
-    canRun = Server.default.serverRunning;
-    if(hasSource.not and: { canRun }) {
-        Server.default.bind({
-            Ndef(key, func);
-            Ndef(key).ar(2); // stereo bus guarantee
-        });
-    };
-};
-
-// ---- Test sources (no microphone) ----
-
-// Percussive melody pings (pitches change; great for delay/reverb)
-ensureProxyFunc.(\testmelody, {
-    var trig, freqSeq, freq, ampEnv, panPos, tone;
-    trig    = Impulse.kr(3.5);
-    freqSeq = Dseq([220, 277.18, 329.63, 392.00, 329.63, 277.18, 246.94], inf);
-    freq    = Demand.kr(trig, 0, freqSeq);
-    ampEnv  = Decay2.kr(trig, 0.01, 0.35);
-    panPos  = ToggleFF.kr(trig).linlin(0, 1, -0.6, 0.6);
-    tone    = SinOsc.ar(freq) * ampEnv * 0.25;
-    Pan2.ar(tone, panPos)
-});
-
-// Sparse tonal bursts (reverb tails are obvious)
-ensureProxyFunc.(\testbursts, {
-    var trig, env, freq, tone, panPos;
-    trig   = Impulse.kr(1.2);
-    env    = EnvGen.kr(Env.perc(0.005, 0.8, 0.6), trig);
-    freq   = TExpRand.kr(180, 660, trig);
-    tone   = SinOsc.ar(freq) * env * 0.35;
-    panPos = LFNoise1.kr(0.2).range(-0.7, 0.7);
-    Pan2.ar(tone, panPos)
-});
-
-// ---- Effects (stereo-safe, simple defaults) ----
-ensureProxyFunc.(\delay, {
-    var inputSignal, time, fb, mix, delayed;
-    inputSignal = \in.ar(2);
-    time = \time.kr(0.45).clip(0.01, 2.0);
-    fb   = \fb.kr(0.35).clip(0.0, 0.95);
-    mix  = \mix.kr(0.5).clip(0.0, 1.0);
-    delayed = CombC.ar(inputSignal, 2.0, time, time * (fb * 6 + 0.1));
-    XFade2.ar(inputSignal, delayed, (mix * 2 - 1))
-});
-
-ensureProxyFunc.(\tremolo, {
-    var inputSignal, rate, depth, lfo;
-    inputSignal = \in.ar(2);
-    rate  = \rate.kr(5).clip(0.1, 20);
-    depth = \depth.kr(0.6).clip(0, 1);
-    lfo   = SinOsc.kr(rate).range(1 - depth, 1);
-    inputSignal * lfo
-});
-
-ensureProxyFunc.(\reverb, {
-    var inputSignal, mix, room, damp;
-    inputSignal = \in.ar(2);
-    mix  = \mix.kr(0.35).clip(0, 1);
-    room = \room.kr(0.5).clip(0, 1);
-    damp = \damp.kr(0.3).clip(0, 1);
-    FreeVerb.ar(inputSignal, mix, room, damp)
-});
-
-ensureProxyFunc.(\chorus, {
-    var inputSignal, rate, depth, baseDelay, modDelay;
-    inputSignal = \in.ar(2);
-    rate      = \rate.kr(0.8).clip(0.1, 5);
-    depth     = \depth.kr(0.008).clip(0.0, 0.02);
-    baseDelay = \base.kr(0.020).clip(0.0, 0.05);
-    modDelay  = baseDelay + (SinOsc.kr(rate, 0, depth));
-    DelayC.ar(inputSignal, 0.1, modDelay)
-});
-
-ensureProxyFunc.(\drive, {
-    var inputSignal, gain;
-    inputSignal = \in.ar(2);
-    gain = \gain.kr(2.5).clip(1, 10);
-    (inputSignal * gain).tanh
-});
-)
-
-// [0.3] NO MIC GUARANTEE — override \ts0 to be an internal source (before creating pedalboard)
-(
-Server.default.bind({
-    // Use testmelody (or switch to \testbursts by replacing the function)
-    Ndef(\ts0, {
-        var trig, freqSeq, freq, env, panPos, tone;
-        trig    = Impulse.kr(3.5);
-        freqSeq = Dseq([220, 277.18, 329.63, 392.00, 329.63, 277.18, 246.94], inf);
-        freq    = Demand.kr(trig, 0, freqSeq);
-        env     = Decay2.kr(trig, 0.01, 0.35);
-        panPos  = ToggleFF.kr(trig).linlin(0, 1, -0.6, 0.6);
-        tone    = SinOsc.ar(freq) * env * 0.25;
-        Pan2.ar(tone, panPos)
-    });
-    Ndef(\ts0).ar(2);
-});
-);
-
-// [0.4] Pedalboard instance (uses \ts0 internally, now safe)
-~pedalboard = MagicPedalboardNew.new;
-~pedalboard.printChains;
-
-// [A] Audio sanity (no microphone)
-~pedalboard.reset; // CURRENT plays \ts0 which is internal testmelody now
-~pedalboard.setSource(\testmelody); ~pedalboard.switchChain(0.1);
-
-// ======================
-// [1] Scenario 1 — basic
-// ======================
-
-~pedalboard.reset;
-~pedalboard.setSource(\testmelody); ~pedalboard.switchChain(0.1);
-~pedalboard.add(\delay); ~pedalboard.printChains;
-~pedalboard.switchChain(0.1);
-~procs = ~pedalboard.effectiveCurrent; ~currentProcs = if(~procs.size > 2) { ~procs.copyRange(1, ~procs.size-2) } { [] };
-~pedalboard.clearChain;
-(
-var indexCounter;
-indexCounter = 0;
-while({ indexCounter < ~currentProcs.size }, {
-    ~pedalboard.add(~currentProcs[indexCounter]);
-    indexCounter = indexCounter + 1;
-});
-~pedalboard.setSource(~procs.last);
-);
-~pedalboard.add(\reverb); ~pedalboard.printChains;
-~pedalboard.switchChain(0.12);
-~effNext = ~pedalboard.effectiveNext; ~delayIndex = ~effNext.indexOf(\delay);
-if(~delayIndex.notNil and: { ~delayIndex > 0 and: { ~delayIndex < (~effNext.size-1) } }) {
-    ~pedalboard.removeAt(~delayIndex);
-    ~pedalboard.addAt(\tremolo, ~delayIndex);
-};
-~pedalboard.printChains;
-~pedalboard.switchChain(0.1);
-
-// ==========================
-// [2] Scenario 2 — bypass/swap
-// ==========================
-
-~pedalboard.clearChain; ~pedalboard.add(\tremolo); ~pedalboard.add(\chorus); ~pedalboard.add(\delay); ~pedalboard.add(\reverb); ~pedalboard.printChains;
-~pedalboard.bypass(\chorus, true); ~pedalboard.bypass(\reverb, true); ~pedalboard.printChains;
-~pedalboard.switchChain(0.25);
-~pedalboard.bypass(\chorus, false); ~pedalboard.printChains;
-~pedalboard.swap(1, 2); ~pedalboard.printChains;
-~pedalboard.switchChain(0.5);
-~pedalboard.bypass(\reverb, false); ~pedalboard.switchChain(0.1);
-
-// ===============================
-// [3] Scenario 3 — live tweaks now
-// ===============================
-
-~pedalboard.printChains;
-~pedalboard.bypassAtCurrent(1, true); ~pedalboard.printChains;
-~pedalboard.bypassAtCurrent(1, false);
-~pedalboard.switchChain(0.1); ~pedalboard.switchChain(0.1);
-~effNext = ~pedalboard.effectiveNext; ~lastProcIdx = ~effNext.size - 2;
-if(~lastProcIdx >= 1) { ~pedalboard.removeAt(~lastProcIdx); ~pedalboard.addAt(\drive, ~lastProcIdx); };
-~pedalboard.printChains;
-~pedalboard.switchChain(0.1);
-
-
-
-
-~assertHas = { arg list, key;
-    if(list.includes(key).not) { ("ASSERT missing " ++ key).postln };
-};
-~assertEnds = { arg list, key;
-    if(list.last != key) { ("ASSERT last must be " ++ key).postln };
-};
 // OneShot_Acceptance_CommandDriven.scd
 // v0.2.3
 // MD 20250917-1312
@@ -2980,386 +4008,6 @@ ensureAudioRateAndReloadMeters = {
 
 ensureAudioRateAndReloadMeters.();
 )
-(
-// =========================
-// Runner_MagicDisplayGUI.scd  (single block)~md_force
-// =========================
-
-/* Goals:
-   - Exactly 1 MagicDisplayGUI window (close dupes; rebuild cleanly)
-   - Visible PROBE FRAME overlay
-   - Run Scenario 1 (fast) step-by-step
-   - Re-entrant guard with auto-unlock; repeatable after closing the window
-   - AppClock-only GUI operations; no server.sync; no watchers; no queueUi override
-   - Style: tilde vars, var-first, lowercase names, no single-letter locals
-*/
-
-~md_version = (~md_version ? (
-    runner: "Runner 1.0.3",
-    mpb: "MagicPedalboardNew v0.3.8",
-    md: "MagicDisplay v0.1.2",
-    mdgui: "MagicDisplayGUI v0.2.4"
-));
-
-~md_guard = ~md_guard ? false;
-~md_guard_time = ~md_guard_time ? nil;
-~md_guard_timeout = ~md_guard_timeout ? 10.0;
-~md_run_token = ~md_run_token ? 0;
-
-/* ---------- preflight ---------- */
-
-~md_preflightGui = {
-    var did_set;
-    did_set = false;
-    GUI.qt;  // safe to call repeatedly; warning is cosmetic
-    AppClock.sched(0.0, { "[AC] preflight ping".postln; nil });
-    did_set = true;
-    did_set
-};
-
-/* ---------- window helpers ---------- */
-
-~md_title_is_mdg = { |window_ref|
-    var ok, title_text;
-    ok = false;
-    title_text = "";
-    if(window_ref.notNil) {
-        if(window_ref.respondsTo(\name) and: { window_ref.name.notNil }) {
-            title_text = window_ref.name.asString;
-            ok = title_text.beginsWith("MagicDisplayGUI");
-        };
-    };
-    ok
-};
-
-/*~md_title_is_mdg = { |window_ref|
-    var ok, title_text;
-    ok = false;
-    title_text = "";
-    if(window_ref.notNil) {
-        if(window_ref.respondsTo(\name) and: { window_ref.name.notNil }) {
-            title_text = window_ref.name.asString;
-            // REQUIRE: title begins with "MagicDisplayGUI"
-            ok = title_text.beginsWith("MagicDisplayGUI");
-        };
-    };
-    ok
-};*/
-
-/*~md_title_is_mdg = { |window_ref|
-    var ok, title_text, lower;
-    ok = false;
-    title_text = "";
-    lower = "";
-    if(window_ref.notNil) {
-        if(window_ref.respondsTo(\name) and: { window_ref.name.notNil }) {
-            title_text = window_ref.name.asString;
-            lower = title_text.toLower;
-            ok = (
-                lower.contains("magicdisplaygui")
-                or: { lower.contains("current / next") }
-                or: { lower.contains("magic display") }
-            );
-        };
-    };
-    ok
-};*/
-
-~md_all_windows = {
-    var wins;
-    wins = Window.allWindows;
-    if(wins.isNil) { wins = [] };
-    wins
-};
-
-~md_get_gui_windows = {
-    var wins, mdg;
-    wins = ~md_all_windows.();
-    mdg = wins.select({ |w| ~md_title_is_mdg.(w) });
-    mdg
-};
-
-~md_checkWindows = {
-    var wins, titles;
-    wins = ~md_all_windows.();
-    titles = wins.collect({ |w| w.name.asString });
-    "[WIN] ALL count = %, titles = %".format(wins.size, titles).postln;
-};
-
-~md_close_matching_windows = {
-    var wins;
-    wins = ~md_all_windows.();
-    AppClock.sched(0.0, {
-        var to_close, count_closed;
-        to_close = wins.select({ |w| ~md_title_is_mdg.(w) });
-        count_closed = 0;
-        to_close.do({ |w|
-            if(w.notNil) {
-                w.close;
-                count_closed = count_closed + 1;
-            };
-        });
-        "[WIN] closed % MagicDisplayGUI window(s)".format(count_closed).postln;
-        nil
-    });
-};
-
-~md_frontWindow = {
-    var wins, target, prev_flag, has_top;
-    wins = ~md_all_windows.();
-    if(wins.size == 0) {
-        "[WIN] nothing to front".postln;
-    }{
-        target = wins.last;
-        AppClock.sched(0.0, {
-            has_top = target.respondsTo(\alwaysOnTop);
-            if(has_top) {
-                prev_flag = target.alwaysOnTop;
-                target.alwaysOnTop_(true);
-            };
-            target.front;
-            if(has_top) {
-                AppClock.sched(0.05, { target.alwaysOnTop_(prev_flag); nil });
-            };
-            "[WIN] fronted: %".format(target.name).postln;
-            nil
-        });
-    };
-};
-
-/* ---------- PROBE FRAME overlay ---------- */
-
-~md_probe_view = ~md_probe_view ? nil;
-
-~md_attach_probe_frame = {
-    var wins, target, root, bounds_rect, view_local, font_obj;
-    wins = ~md_all_windows.();
-    if(wins.size == 0) {
-        "[GUI] PROBE skipped (no windows)".postln;
-    }{
-        target = wins.last;
-        AppClock.sched(0.0, {
-            if(target.view.isNil) {
-                "[GUI] PROBE skipped (no root view)".postln;
-            }{
-                if(~md_probe_view.notNil) {
-                    (~md_probe_view.tryPerform(\remove) ? nil);
-                    ~md_probe_view = nil;
-                };
-                root = target.view;
-                bounds_rect = Rect(8, 8, 180, 24);
-                font_obj = Font("Helvetica", 12);
-                view_local = UserView(root, bounds_rect).background_(Color.clear).clearOnRefresh_(true);
-                view_local.drawFunc_({
-                    Pen.color_(Color.red); Pen.width = 1.5;
-                    Pen.addRect(Rect(0, 0, bounds_rect.width, bounds_rect.height)); Pen.stroke;
-                    Pen.stringAtPoint("PROBE FRAME", Point(6, 6), font_obj);
-                });
-                view_local.visible_(true);
-                ~md_probe_view = view_local;
-                "[GUI] PROBE FRAME attached".postln;
-            };
-            nil
-        });
-    };
-};
-
-/* ---------- ensure ~mpb exists (best-effort; no server.sync) ---------- */
-
-~md_ensure_mpb = {
-    var created_flag;
-    created_flag = false;
-    if(~mpb.isNil) {
-        "[BOOT] ~mpb missing — creating".postln;
-        if(MagicPedalboardNew.respondsTo(\new)) {
-            ~mpb = MagicPedalboardNew.new;
-            created_flag = true;
-        }{
-            "[BOOT] MagicPedalboardNew.new not available".postln;
-        };
-    }{
-        "[BOOT] ~mpb already present".postln;
-    };
-    if(created_flag) { "[BOOT] created ~mpb".postln; };
-};
-
-/* ---------- public API ---------- */
-
-~md_runnerUnlock = {
-    var now_time;
-    now_time = Main.elapsedTime;
-    if(~md_guard) { "[SAFE] manual unlock".postln };
-    ~md_guard = false;
-    ~md_guard_time = now_time;
-};
-
-/* Emergency fresh-create + front + probe (deterministic) */
-~md_forceCreateWindow = {
-    AppClock.sched(0.0, {
-        var existing_window, attach_and_front;
-
-        "[RUN] ensure single MagicDisplayGUI window".postln;
-        ~md_preflightGui.();
-
-        attach_and_front = {
-            ~md_attach_probe_frame.();
-            ~md_frontWindow.();
-            ~md_checkWindows.();
-        };
-
-        AppClock.sched(0.20, {
-            existing_window = Window.allWindows.detect({ |w|
-                var name_string, begins_ok;
-                name_string = w.name.asString;
-                begins_ok = name_string.notNil and: { name_string.beginsWith("MagicDisplayGUI") };
-                begins_ok
-            });
-
-            if(existing_window.notNil) {
-                "[BOOT] reusing existing MagicDisplayGUI window".postln;
-                existing_window.front;
-                AppClock.sched(0.45, { attach_and_front.value; nil });
-            }{
-                "[BOOT] creating MagicDisplayGUI.new()".postln;
-                ~gui = MagicDisplayGUI.new();
-                AppClock.sched(0.45, { attach_and_front.value; nil });
-            };
-            nil
-        });
-        nil
-    });
-};
-
-/*~md_forceCreateWindow = {
-    AppClock.sched(0.0, {
-        var existing_window, attach_and_front;
-
-        "[RUN] ensure single MagicDisplayGUI window".postln;
-        ~md_preflightGui.();
-
-        attach_and_front = {
-            // keep your probe & front logic the same
-            ~md_attach_probe_frame.();
-            ~md_frontWindow.();
-            ~md_checkWindows.();
-        };
-
-        AppClock.sched(0.20, {
-            existing_window = Window.allWindows.detect({ |w|
-                var name_string, begins_ok;
-                name_string = w.name.asString;
-                begins_ok = name_string.notNil and: { name_string.beginsWith("MagicDisplayGUI") };
-                begins_ok
-            });
-
-            if(existing_window.notNil) {
-                "[BOOT] reusing existing MagicDisplayGUI window".postln;
-                existing_window.front;
-                AppClock.sched(0.45, { attach_and_front.value; nil });
-            }{
-                "[BOOT] creating MagicDisplayGUI.new()".postln;
-                // Correct constructor for your GUI: builds on AppClock inside initGui
-                ~gui = MagicDisplayGUI.new();
-                AppClock.sched(0.45, { attach_and_front.value; nil });
-            };
-            nil
-        });
-        nil
-    });
-};*/
-
-// ~md_forceCreateWindow = {
-// 	AppClock.sched(0.0, {
-// 		"[RUN] force-create window".postln;
-// 		~md_preflightGui.();
-// 		~md_close_matching_windows.();
-// 		AppClock.sched(0.20, {
-// 			// Correct constructor for your GUI: no args; builds on AppClock inside initGui
-// 			"[BOOT] calling MagicDisplayGUI.new()".postln;
-// 			~gui = MagicDisplayGUI.new();
-// 			AppClock.sched(0.45, {
-// 				~md_attach_probe_frame.();
-// 				~md_frontWindow.();
-// 				~md_checkWindows.();
-// 				nil
-// 			});
-// 			nil
-// 		});
-// 		nil
-// 	});
-// };
-
-~md_bootProbeScenario = {
-    var now_time, guard_age, timeout_seconds, token_local, scenario_func;
-
-    ~md_preflightGui.();
-
-    now_time = Main.elapsedTime;
-    guard_age = now_time - (~md_guard_time ? now_time);
-    timeout_seconds = ~md_guard_timeout ? 10.0;
-
-    if(~md_guard and: { guard_age > timeout_seconds }) {
-        "[SAFE] auto-unlock (stale)".postln;
-        ~md_runnerUnlock.();
-    };
-
-    if(~md_guard) {
-        "[RUN] already running — ignoring".postln;
-    }{
-        ~md_guard = true;
-        ~md_guard_time = now_time;
-        ~md_run_token = (~md_run_token ? 0) + 1;
-        token_local = ~md_run_token;
-
-        "[RUN] start token % | % / % / %".format(
-            token_local, ~md_version[\mpb], ~md_version[\md], ~md_version[\mdgui]
-        ).postln;
-
-        // failsafe auto-unlock
-        AppClock.sched(timeout_seconds, {
-            var still_active;
-            still_active = ~md_guard and: { ~md_run_token == token_local };
-            if(still_active) {
-                "[SAFE] auto-unlock (timeout)".postln;
-                ~md_runnerUnlock.();
-            };
-            nil
-        });
-
-        // ensure env + window, then run Scenario 1 (fast)
-        ~md_ensure_mpb.();
-        ~md_forceCreateWindow.();
-        AppClock.sched(0.90, {
-            scenario_func = ~sc_fast_scenario1;
-            if(scenario_func.notNil) {
-                "[RUN] starting Scenario 1 (fast)".postln;
-                scenario_func.({
-                    "[RUN] Scenario 1 complete".postln;
-                    ~md_runnerUnlock.();
-                });
-            }{
-                "[RUN] Scenario 1 function (~sc_fast_scenario1) not found; unlocking".postln;
-                ~md_runnerUnlock.();
-            };
-            nil
-        });
-    };
-};
-
-/* ---------- safe fallback for refresh (non-invasive) ---------- */
-
-if(~refreshGuiFromMpb.isNil) {
-    ~refreshGuiFromMpb = { |tag_text|
-        var safe_tag;
-        safe_tag = tag_text ? "no-tag";
-        "[GUI] refreshGuiFromMpb (fallback) — %".format(safe_tag).postln;
-    };
-    "[INFO] installed fallback ~refreshGuiFromMpb (non-invasive)".postln;
-};
-
-"[INFO] % loaded. Ready.".format(~md_version[\runner]).postln;
-
-) // end block
 // saveonly_commandtree_current_to_json.scd
 // v0.2
 // MD 20250916-0942
@@ -3384,112 +4032,6 @@ jsonString = JSONlib.convertToJSON(~tree.root.asDictRecursively);
 "💾 Saved versioned JSON and wrote current tree to: ".postln;
 jsonPath.postln;
 )
-(
-// =========================
-// Scenarios_MagicDisplayGUI_Fast.scd  (single block)
-// =========================
-// AppClock-only; uses ~gui.queueUi if present; updates via ~refreshGuiFromMpb + showExpectation
-
-~md_with_queue_ui = { |ui_func|
-    var runnable_func, has_queue;
-    runnable_func = ui_func ? { };
-    has_queue = (~gui.notNil) and: { ~gui.respondsTo(\queueUi) };
-    if(has_queue) { ~gui.queueUi.(runnable_func) }{ "[GUI] queueUi unavailable — skipping ui_func".postln };
-};
-
-// -------- Scenario 1 (fast) --------
-~sc_fast_scenario1 = { |done_func|
-    var step_interval, carry_on;
-    step_interval = 0.25;
-    carry_on = { |next_func| AppClock.sched(step_interval, { next_func.value; nil }) };
-
-    AppClock.sched(0.0, {
-        ~md_with_queue_ui.({
-            if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 1: step 0") };
-        });
-        ~refreshGuiFromMpb.("sc1-step0");
-        nil
-    });
-
-    carry_on.({
-        ~md_with_queue_ui.({ if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 1: step 1") } });
-        ~refreshGuiFromMpb.("sc1-step1");
-
-        carry_on.({
-            ~md_with_queue_ui.({ if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 1: step 2") } });
-            ~refreshGuiFromMpb.("sc1-step2");
-
-            carry_on.({
-                ~md_with_queue_ui.({ if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 1: step 3") } });
-                ~refreshGuiFromMpb.("sc1-step3");
-
-                carry_on.({
-                    ~md_with_queue_ui.({ if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 1: step 4") } });
-                    ~refreshGuiFromMpb.("sc1-step4");
-
-                    carry_on.({
-                        ~md_with_queue_ui.({ if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 1: done") } });
-                        ~refreshGuiFromMpb.("sc1-done");
-                        if(done_func.notNil) { done_func.value };
-                    });
-                });
-            });
-        });
-    });
-};
-
-// -------- Scenario 2 (fast) --------
-~sc_fast_scenario2 = { |done_func|
-    var step_interval;
-    step_interval = 0.2;
-
-    AppClock.sched(0.0, {
-        ~md_with_queue_ui.({ if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 2: A-chain preview") } });
-        ~refreshGuiFromMpb.("sc2-A");
-
-        AppClock.sched(step_interval, {
-            ~md_with_queue_ui.({ if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 2: B-chain preview") } });
-            ~refreshGuiFromMpb.("sc2-B");
-
-            AppClock.sched(step_interval, {
-                ~md_with_queue_ui.({ if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 2: done") } });
-                ~refreshGuiFromMpb.("sc2-done");
-                if(done_func.notNil) { done_func.value };
-                nil
-            });
-            nil
-        });
-        nil
-    });
-};
-
-// -------- Scenario 3 (fast) --------
-~sc_fast_scenario3 = { |done_func|
-    var step_interval, index_counter, rounds_total, do_round;
-    step_interval = 0.18;
-    index_counter = 0;
-    rounds_total = 5;
-
-    AppClock.sched(0.0, {
-        do_round = {
-            if(index_counter >= rounds_total) {
-                ~md_with_queue_ui.({ if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 3: done") } });
-                ~refreshGuiFromMpb.("sc3-done");
-                if(done_func.notNil) { done_func.value };
-            }{
-                ~md_with_queue_ui.({ if(~gui.respondsTo(\showExpectation)) { ~gui.showExpectation.("Scenario 3: tick %".format(index_counter)) } });
-                ~refreshGuiFromMpb.("sc3-%".format(index_counter));
-                index_counter = index_counter + 1;
-                AppClock.sched(step_interval, { do_round.value; nil });
-            };
-            nil
-        };
-        do_round.value;
-        nil
-    });
-};
-
-) // end block
 // StartHere_CleanBoot_OneWindow_BringUp.scd
 // v0.6
 // MD 20250917-1616
@@ -5137,6 +5679,48 @@ summary.postln;
 
     log.("forceReconnect done. current=" ++ effCur ++ "  next=" ++ effNext);
 };
+)
+// Verify_SetSourcesBoth_Today.scd
+// v0.2
+// MD 2025-09-18 13:46 BST
+
+// Purpose
+// - Verify that both chains have \testmelody as their source symbol, without assuming ~mpb exists.
+// Style
+// - var-first; lowercase; no server.sync; server ops via class methods only.
+
+(
+var warn, ensureSources;
+warn = { arg s; var msg; msg = "[VERIFY] " ++ s; msg.warn };
+
+if(~mpb.isNil) {
+    warn.("~mpb is nil. Run StartHere_CleanBoot_OneWindow_BringUp.scd first.");
+    ^nil;
+};
+
+ensureSources = {
+    Server.default.bind({
+        if(Ndef(\testmelody).source.isNil) {
+            Ndef(\testmelody, {
+                var trig, seq, f, env, pan;
+                trig = Impulse.kr(3.2);
+                seq  = Dseq([220,277.18,329.63,392,329.63,277.18,246.94], inf);
+                f    = Demand.kr(trig, 0, seq);
+                env  = Decay2.kr(trig, 0.01, 0.35);
+                pan  = ToggleFF.kr(trig).linlin(0,1,-0.6,0.6);
+                Pan2.ar(SinOsc.ar(f) * env * 0.25, pan)
+            });
+        };
+        Ndef(\testmelody).ar(2);
+        Ndef(\ts0, { Silent.ar(2) }); Ndef(\ts0).ar(2);
+    });
+};
+
+ensureSources.();
+~mpb.setSourceCurrent(\testmelody);
+~mpb.setSource(\testmelody);
+~mpb.printChains;
+"[VERIFY] Both chains point to \\testmelody (CURRENT and NEXT)".postln;
 )
 // XEnforce_EndAndRecreateSilent_Now.scd
 // v0.1
