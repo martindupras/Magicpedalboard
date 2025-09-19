@@ -1,12 +1,13 @@
 // Test_MagicAudio_BringUp_A_B.scd
-// v0.9.2
+// v0.9.3
 // MD 20250919-09:16 BST
+
 /*
 Purpose
 - Robust audio bring-up (no SoundIn), Option A for NEXT:
-  - Single atomic bundle creates all Ndefs and a dedicated root group.
+  - Atomic build into a dedicated root group (~mpRoot).
   - A audible; B muted at source until switch.
-  - Processors via Ndef(\chainX).filter dict.
+  - FX via Ndef(\chainX).filter dictionary.
   - Helpers: ~applyToNext, ~clearNext, ~switchNow, ~audioReset.
 
 Style
@@ -14,7 +15,7 @@ Style
 */
 
 (
-var boot, buildOnce, installFxDict, installHelpers, announce, audioReset;
+var boot, installFxDict, buildOnce, installHelpers, announce;
 var s;
 
 boot = {
@@ -33,16 +34,15 @@ boot = {
     AppClock.sched(0.00, { run.value; nil });
 };
 
-// ---- FX dictionary (same as before, with your minus style) ----
 installFxDict = {
     var run;
     run = {
         ~fx = IdentityDictionary[
-            \delay -> { arg in, time = 0.35, decay = 2.0, max=1.0;
+            \delay -> { arg in, time=0.35, decay=2.0, max=1.0;
                 time = time.clip(0.005, max);
                 CombC.ar(in, max, time, decay)
             },
-            \reverb -> { arg in, mix = 0.20, room = 0.60, damp = 0.50;
+            \reverb -> { arg in, mix=0.20, room=0.60, damp=0.50;
                 FreeVerb.ar(in, mix.clip(0,1), room.clip(0,1), damp.clip(0,1))
             },
             \chorus -> { arg in, depth=0.003, rate=0.25;
@@ -62,21 +62,23 @@ installFxDict = {
     AppClock.sched(0.02, { run.value; nil });
 };
 
-// ---- Atomic graph creation to avoid Group/Node races ----
 buildOnce = {
     var run;
     run = {
-        var lat, makeGraph;
+        var lat, atomBuild, stopClear;
         lat = s.latency ? 0.2;
 
-        makeGraph = {
-            // free any previous root group / proxies
-            if(~mpRoot.notNil) { try { ~mpRoot.free } };
-            [\srcA, \srcB, \chainA, \chainB, \mix, \out].do({ arg k;
-                try { Ndef(k).clear }
-            });
+        atomBuild = {
+            // stop/clear any prior proxies quietly
+            stopClear = { arg name;
+                var p = Ndef(name);
+                if(p.isPlaying) { p.stop };
+                p.clear;
+            };
+            [\out, \mix, \chainA, \chainB, \srcA, \srcB].do(stopClear);
 
-            // dedicated root group for this pedalboard
+            // new root group
+            if(~mpRoot.notNil) { try { ~mpRoot.free } };
             ~mpRoot = Group.head(s);
 
             // sources
@@ -103,27 +105,29 @@ buildOnce = {
                 Select.ar(muted.clip(0,1), [sig, Silent.ar(2)])
             };
 
-            // chains and mix
+            // chains
             Ndef(\chainA).fadeTime = 0.02;
             Ndef(\chainA).source = { Ndef(\srcA).ar };
 
             Ndef(\chainB).fadeTime = 0.02;
             Ndef(\chainB).source = { Ndef(\srcB).ar };
 
+            // mix and out
             Ndef(\mix).fadeTime = 0.02;
             Ndef(\mix).source = { Ndef(\chainA).ar + Ndef(\chainB).ar };
 
-            // out: play into our root group
             Ndef(\out).fadeTime = 0.02;
             Ndef(\out).source = { Ndef(\mix).ar };
-            Ndef(\out).play(target: ~mpRoot);
+
+            // play out into our group (positional group arg #6)
+            Ndef(\out).play(0, nil, ~mpRoot, 1.0, 1.0, 0.02, \addToHead);
 
             // initial params
             Ndef(\srcA).set(\amp, 0.20);
             Ndef(\srcB).set(\amp, 0.20, \muted, 1); // Option A
         };
 
-        s.makeBundle(lat, makeGraph);
+        s.makeBundle(lat, atomBuild);
         AppClock.sched(lat + 0.05, { "[AUDIO] atomic graph built + out playing".postln; nil });
         nil
     };
@@ -170,17 +174,23 @@ installHelpers = {
         };
 
         ~audioReset = {
-            var lat, reset;
+            var lat, doReset;
             lat = s.latency ? 0.2;
-            reset = {
+            doReset = {
+                [\out, \mix, \chainA, \chainB, \srcA, \srcB].do({ arg k;
+                    var p = Ndef(k);
+                    if(p.isPlaying) { p.stop };
+                    p.clear;
+                });
                 if(~mpRoot.notNil) { try { ~mpRoot.free } };
-                [\srcA, \srcB, \chainA, \chainB, \mix, \out].do({ arg k; try { Ndef(k).clear } });
             };
-            s.makeBundle(lat, reset);
+            s.makeBundle(lat, doReset);
             AppClock.sched(lat + 0.05, { buildOnce.value; nil });
             "[AUDIO] reset requested".postln;
         };
 
+        // initial GUI hint
+        if(~gui.notNil) { ~gui.highlightCurrentColumn(\chainA) };
         nil
     };
     AppClock.sched(0.10, { run.value; nil });
@@ -195,7 +205,6 @@ announce = {
     AppClock.sched(0.12, { run.value; nil });
 };
 
-// ---- run ----
 boot.value;
 installFxDict.value;
 buildOnce.value;
