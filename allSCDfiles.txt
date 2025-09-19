@@ -316,6 +316,42 @@ if(alreadyWrapped.not) {
 
 
 )
+// Adapter_UIHook_Install.scd
+// v0.2.0
+// MD 20250918-20:10 BST
+
+/* Purpose
+   - Wrap ~ct_applyOSCPathToMPB to call ~procHud_update after each token apply.
+   - No behavior change to your adapter's logic.
+
+   Style
+   - var-first; lowercase; AppClock for UI calls; no server.sync.
+*/
+
+(
+var wrap;
+
+if(~ct_applyOSCPathToMPB.isNil) {
+    "[UIHOOK] ~ct_applyOSCPathToMPB is nil; load the adapter file first.".warn;
+    ^nil
+};
+
+if(~ct_applyOSCPathToMPB_orig.isNil) {
+    ~ct_applyOSCPathToMPB_orig = ~ct_applyOSCPathToMPB;
+};
+
+wrap = { arg pathString, mpb, gui;
+    var result;
+    result = ~ct_applyOSCPathToMPB_orig.(pathString, mpb, gui);
+    if(~procHud_update.notNil) {
+        AppClock.sched(0.0, { ~procHud_update.(); nil });
+    };
+    result
+};
+
+~ct_applyOSCPathToMPB = wrap;
+"[UIHOOK] adapter UI hook installed".postln;
+)
 // audibleSanity.scd
 // v0.2
 // MD 20250916
@@ -1636,273 +1672,6 @@ reportList = { arg label, listSyms;
 reportList.("CURRENT", ~mpb.effectiveCurrent);
 reportList.("NEXT   ", ~mpb.effectiveNext);
 )
-// diag_dump_effective_state.scd
-// v0.1
-// MD 20250916
-
-(
-
-
-var aPlaying, bPlaying, line;
-
-~mpb.printChains;
-
-aPlaying = Ndef(\chainA).isPlaying;
-bPlaying = Ndef(\chainB).isPlaying;
-line = "[diag] A.isPlaying=%  B.isPlaying=%".format(aPlaying, bPlaying);
-line.postln;
-)
-// diag_fix_current_source_now.scd
-// v0.1
-// MD 20250916-1030
-
-(
-var log, ensureSource;
-
-log = { arg msg; ("[FIX] " ++ msg).postln };
-
-// Ensure a musical internal source exists (reuse if already defined)
-ensureSource = {
-    Server.default.boot;
-    Server.default.bind({
-        Ndef(\testmelody, {
-            var trig, seq, f, env, tone, panPos;
-            trig = Impulse.kr(3.2);
-            seq  = Dseq([220, 277.18, 329.63, 392, 329.63, 277.18, 246.94], inf);
-            f    = Demand.kr(trig, 0, seq);
-            env  = Decay2.kr(trig, 0.01, 0.35);
-            tone = SinOsc.ar(f) * env * 0.25;
-            panPos = ToggleFF.kr(trig).linlin(0, 1, -0.6, 0.6);
-            Pan2.ar(tone, panPos)
-        });
-        Ndef(\testmelody).ar(2);
-    });
-};
-
-ensureSource.value;
-
-// One GUI window (runner)
-~md_bootProbeScenario.();
-
-// Ensure GUI + Pedalboard, then set CURRENT source and start it
-~gui = ~gui ?? { MagicDisplayGUI.new() };
-~pedalboard = ~pedalboard ?? { MagicPedalboardNew.new(~gui) };
-
-~pedalboard.reset;
-~pedalboard.setSourceCurrent(\testmelody);   // <-- CURRENT, not NEXT
-~pedalboard.playCurrent;                     // <-- start CURRENT so you hear it
-~pedalboard.printChains;
-
-log.("CURRENT should now be audible from \\testmelody.");
-)
-// diag_list_playing_ndefs.scd
-// v0.1
-// MD 20250916-1016
-
-(
-var names, reportRows, indexCounter, totalCount;
-
-names = [\toneTest, \testmelody, \chainA, \chainB, \delay, \chorus];
-reportRows = names.collect({ arg oneName; [oneName, Ndef(oneName).isPlaying] });
-
-indexCounter = 0;
-totalCount = reportRows.size;
-while({ indexCounter < totalCount }, {
-    var row;
-    row = reportRows[indexCounter];
-    ("[PLAY] " ++ row[0] ++ " = " ++ row[1]).postln;
-    indexCounter = indexCounter + 1;
-});
-)
-// diag_manual_chain_patch.scd
-// v0.2 fixes <<>
-// v0.1
-// MD 20250916-1018
-
-(
-var log;
-
-log = { arg msg; ("[DIAG] " ++ msg).postln };
-
-Server.default.bind({
-    // ensure a sink for chainA that passes its input
-    Ndef(\chainA, { \in.ar(2) });
-
-    // patch toneTest -> chainA and play chainA
-    Ndef(\chainA) <<> Ndef(\toneTest);
-    Ndef(\chainA).play;
-});
-
-log.("Manual patch: chainA <<> toneTest; chainA.play — you should hear steady tone now.");
-)
-// diag_more_state.scd
-// v0.1
-
-(
-~mpb.printChains;
-
-[
-    [\testmelody,  Ndef(\testmelody).source.notNil,  Ndef(\testmelody).isPlaying],
-    [\delay,       Ndef(\delay).source.notNil,       Ndef(\delay).isPlaying],
-    [\chainA,      Ndef(\chainA).source.notNil,      Ndef(\chainA).isPlaying],
-    [\chainB,      Ndef(\chainB).source.notNil,      Ndef(\chainB).isPlaying]
-].do({ arg row;
-    ("[NODE] " ++ row[0] ++ " source?=" ++ row[1] ++ " playing?=" ++ row[2]).postln;
-});
-)
-// diag_mpb_audio_path.scd
-// v0.1
-// MD 20250916-1012
-
-(
-var log, ensureAudio, playDirect, patchChainManually, patchViaPedalboard;
-
-log = { arg msg; ("[DIAG] " ++ msg).postln };
-
-// A) Boot audio + define a clearly audible test source (stereo)
-ensureAudio = {
-    Server.default.boot;
-    Server.default.bind({
-        Ndef(\toneTest, {
-            var sig;
-            sig = Saw.ar([120, 180]) * 0.15; // steady tone, obvious
-            sig
-        });
-        Ndef(\toneTest).ar(2);
-    });
-    log.("Audio booted and \\toneTest defined.");
-};
-
-// B) Direct play (bypass chain) — you MUST hear a steady tone
-playDirect = {
-    Ndef(\toneTest).play;
-    log.("Direct play \\toneTest — you should hear steady tone now.");
-};
-
-// C) Manual chain patch: route \\toneTest -> \\chainA (no pedalboard API)
-// Expectation: you still hear tone via \\chainA after .play
-patchChainManually = {
-    // ensure chainA exists
-    Ndef(\chainA, { \in.ar(2) });
-    Ndef(\chainA) <<> Ndef(\toneTest);
-    Ndef(\chainA).play;
-    log.("Manual patch: chainA <<> toneTest; chainA.play — you should still hear tone.");
-};
-
-// D) Pedalboard flow: reset -> setSource -> **playCurrent** (explicit) -> print
-patchViaPedalboard = {
-    ~gui = ~gui ?? { MagicDisplayGUI.new() };
-    ~pedalboard = ~pedalboard ?? { MagicPedalboardNew.new(~gui) };
-    ~pedalboard.reset;              // clean chains
-    ~pedalboard.setSource(\toneTest);
-    ~pedalboard.playCurrent;        // explicit start of CURRENT
-    ~pedalboard.printChains;
-    log.("Pedalboard: reset -> setSource toneTest -> playCurrent — you should hear tone.");
-};
-
-// --- run steps ---
-ensureAudio.value;
-playDirect.value;
-
-// comment out the direct play once you confirm sound, then test the next steps:
-// Ndef(\toneTest).stop;  // uncomment to stop direct play
-
-// patchChainManually.value;  // uncomment to test manual chain route
-// Ndef(\chainA).stop;        // stop manual chain when done
-
-// patchViaPedalboard.value;  // uncomment to test pedalboard path (preferred for demo)
-)
-// diag_pedalboard_current_play.scd
-// v0.1
-// MD 20250916-1019
-
-(
-var log;
-
-log = { arg msg; ("[DIAG] " ++ msg).postln };
-
-// Bring up a single GUI window (your runner), then ensure pedalboard exists
-~md_bootProbeScenario.();   // one window + PROBE FRAME (GUI ops on AppClock)
-
-// Create or reuse GUI + Pedalboard
-~gui = ~gui ?? { MagicDisplayGUI.new() };
-~pedalboard = ~pedalboard ?? { MagicPedalboardNew.new(~gui) };
-
-// Clean and start CURRENT audibly
-~pedalboard.reset;
-~pedalboard.setSource(\toneTest);
-~pedalboard.playCurrent;    // <-- critical for immediate audibility
-~pedalboard.printChains;
-
-log.("Pedalboard: reset -> setSource toneTest -> playCurrent — you should hear steady tone now.");
-)
-// Diag_Probe_Sinks_A_B.scd
-// v0.1
-// MD 20250917-1146
-//
-// Purpose: Inspect both sinks safely: source object/class, playing/paused,
-// monitor present? Helps detect if NEXT is still monitored or sourcing non-silent audio.
-// Style: tilde vars, var-first, lowercase names, no server.sync,
-//        server ops inside Server.default.bind.
-
-(
-var probe;
-
-probe = { arg key;
-    var nx = Ndef(key), srcObj, srcClass, srcCode, mon, playing, paused;
-    srcObj  = nx.source;
-    srcClass= srcObj.class;
-    srcCode = srcObj.tryPerform(\asCompileString);
-    mon     = nx.monitor;
-    playing = nx.isPlaying;
-    paused  = nx.paused ? false;
-    ("[PROBE] key=% class=% playing=% paused=% hasMonitor=%"
-        .format(key, srcClass, playing, paused, mon.notNil)).postln;
-    if(srcCode.notNil) {
-        "[PROBE] source asCompileString:".postln;
-        srcCode.postln;
-    }{
-        "[PROBE] (no asCompileString) printing .source:".postln;
-        srcObj.postln;
-    };
-};
-
-probe.(\chainA);
-probe.(\chainB);
-)
-// diag_verify_chain_and_defs.scd
-// v0.1
-
-(
-var listOne, listTwo, lastIndex, checkList, report;
-
-if(~mpb.isNil) { "[DIAG] ~mpb is nil".warn; ^nil };
-
-checkList = { arg label, chainList;
-    var idx, last, missing;
-    if(chainList.isNil) { ("[DIAG] " ++ label ++ ": chain is nil").postln; ^nil };
-    last = chainList.size - 1;
-    missing = Array.new;
-    idx = 1; // processors are 1 .. last-1
-    while({ idx < last }, {
-        var key = chainList[idx];
-        var hasDef = Ndef(key).source.notNil;  // <- definition present?
-        if(hasDef.not) { missing = missing.add(key) };
-        idx = idx + 1;
-    });
-    ("[DIAG] " ++ label ++ " = " ++ chainList).postln;
-    if(missing.isEmpty) { "[DIAG] all processors have sources".postln }
-    { ("[DIAG] missing sources for: " ++ missing).warn };
-};
-
-listOne = ~mpb.effectiveCurrent;
-listTwo = ~mpb.effectiveNext;
-
-checkList.("CURRENT", listOne);
-checkList.("NEXT   ", listTwo);
-
-"[[PLAY]] A=%  B=%".format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying).postln;
-)
 // editor_commandtree_add_demo_verbs.scd
 // v0.3
 // MD 20250916-0957
@@ -1977,593 +1746,6 @@ ensurePath.(["commands","setSource","testmelody"], [10,4,1]);
 
 // save using custom exporter (preserves payloads in JSON)
 ~ct_writeJsonWithPayloads.(~tree, jsonPath, true, saveFolder, savePrefix);
-)
-// Enforce_ExclusiveBySilencingNext.scd
-// v0.2
-// MD 20250916-1714
-
-//
-// Purpose: Guarantee audible exclusivity immediately by silencing the NEXT sink’s source.
-//          CURRENT remains { \in.ar(2) } and audible; NEXT is set to Silent.ar(2). This avoids
-//          NodeProxy monitor tail/race issues where isPlaying may remain true on NEXT.
-// Style: tilde vars, var-first, lowercase names, no server.sync,
-//        server ops inside Server.default.bind.
-
-(
-var log, getCurrentNextSinks, silenceNextSink, ensureCurrentAudible, retargetMeters, verify, sinks;
-
-log = { arg messageString; ("[XONLY] " ++ messageString).postln; };
-
-// Identify sink symbols for CURRENT and NEXT from ~mpb
-getCurrentNextSinks = {
-    if(~mpb.isNil) {
-        "[XONLY] ~mpb is nil".warn;
-        ^nil
-    };
-    ^(
-        current: ~mpb.effectiveCurrent[0],   // \chainA or \chainB
-        next:    ~mpb.effectiveNext[0]       // the other one
-    )
-};
-
-// Replace NEXT sink source with silence; keep bus AR so meters won’t warn
-silenceNextSink = { arg nextSinkSym;
-    Server.default.bind({
-        Ndef(nextSinkSym, { Silent.ar(2) });  // hard silence at the sink
-        Ndef(nextSinkSym).ar(2);
-        Ndef(nextSinkSym).fadeTime_(0.01);
-        Ndef(nextSinkSym).stop;               // stop its monitor quickly (optional)
-    });
-    log.("NEXT " ++ nextSinkSym.asString ++ " silenced");
-};
-
-// Ensure CURRENT uses robust sink source and is playing
-ensureCurrentAudible = { arg currentSinkSym;
-    Server.default.bind({
-        Ndef(currentSinkSym, { \in.ar(2) });
-        Ndef(currentSinkSym).ar(2);
-        Ndef(currentSinkSym).fadeTime_(0.05);
-        if(Ndef(currentSinkSym).isPlaying.not) {
-            Ndef(currentSinkSym).play(numChannels: 2);
-        };
-    });
-    log.("CURRENT " ++ currentSinkSym.asString ++ " robust+playing");
-};
-
-// Reattach meters safely after AR guarantee
-retargetMeters = {
-    if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) {
-        ~gui.enableMeters(false);
-        ~gui.enableMeters(true);
-    };
-};
-
-// Post final state a moment later
-verify = {
-    ~mpb.printChains;
-    AppClock.sched(0.25, {
-        var aPlaying, bPlaying, lineText;
-        aPlaying = Ndef(\chainA).isPlaying;
-        bPlaying = Ndef(\chainB).isPlaying;
-        lineText = "[PLAY] A=%  B=%".format(aPlaying, bPlaying);
-        lineText.postln;
-        nil
-    });
-};
-
-// --- run ---
-sinks = getCurrentNextSinks.value;
-if(sinks.notNil) {
-    ensureCurrentAudible.(sinks[\current]);
-    silenceNextSink.(sinks[\next]);
-    retargetMeters.value;
-    verify.value;
-};
-)
-// Enforce_OptionA_PauseFlagNow.scd
-// v0.3
-// MD 20250917-1216
-//
-// Purpose: Deterministic exclusivity for both audio *and* flags.
-//          - mold sinks to stereo
-//          - set NEXT source to Silent.ar(2)
-//          - stop + pause NEXT to drop monitor flag
-//          - small retry loop (max 6) with short waits
-// Style: tilde vars, var-first, lowercase names, no server.sync,
-//        server ops inside Server.default.bind.
-
-(
-var log, curSink, nextSink, tries, maxTries, waitS, dropFlag;
-
-log = { arg s; ("[X-ENFORCE] " ++ s).postln };
-
-if(~mpb.isNil) { "[X-ENFORCE] ~mpb is nil".warn; ^nil };
-
-curSink  = ~mpb.currentChain[0];
-nextSink = ~mpb.nextChain[0];
-tries    = 0; maxTries = 6; waitS = 0.08;
-
-log.("meters off (if GUI present)");
-if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) {
-    AppClock.sched(0.00, { ~gui.enableMeters(false); nil });
-    AppClock.sched(0.05, { ~gui.enableMeters(false); nil });
-};
-
-// pin stereo + enforce Option A once
-Server.default.bind({
-    // shape first
-    Ndef(curSink ).mold(2, \audio); Ndef(nextSink).mold(2, \audio);
-
-    // robust CURRENT
-    Ndef(curSink,  { \in.ar(2) }); Ndef(curSink ).ar(2); Ndef(curSink ).fadeTime_(0.10);
-    if(Ndef(curSink).isPlaying.not) { Ndef(curSink).play(numChannels: 2) };
-
-    // NEXT: hard silence at source + stop
-    Ndef(nextSink, { Silent.ar(2) }); Ndef(nextSink).ar(2); Ndef(nextSink).fadeTime_(0.01);
-    Ndef(nextSink).stop;
-});
-
-// retry loop: if NEXT still reports playing, clear->reset Silent, pause, re-check
-Routine({
-    var still;
-    dropFlag = {
-        Server.default.bind({
-            Ndef(nextSink).clear(0);            // drop any lingering node
-            Ndef(nextSink, { Silent.ar(2) });   // re-assert Silent source
-            Ndef(nextSink).ar(2);
-            Ndef(nextSink).pause;               // ensure monitor flag false
-        });
-    };
-    while({
-        still = Ndef(nextSink).isPlaying;
-        (still and: { tries < maxTries })
-    }, {
-        tries = tries + 1;
-        dropFlag.();
-        waitS.wait;
-    });
-
-    // meters back on
-    AppClock.sched(0.00, {
-        if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) { ~gui.enableMeters(true) };
-        ("[X-ENFORCE] [PLAY] A=% B=%"
-            .format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
-        nil
-    });
-}).play(SystemClock);
-)
-// Enforce_OptionA_Strict_KillNextMonitor.scd
-// v0.1
-// MD 20250917-1155
-//
-// Purpose: Deterministically silence NEXT and drop its monitor (pause+stop+end),
-// while keeping CURRENT audible. Avoids GUI/server races by disabling meters first.
-// Style: tilde vars, var-first, lowercase names, no server.sync,
-//        server ops inside Server.default.bind.
-
-(
-var log, disableMeters, getSinks, killNextHard, ensureCurrent, enableMeters, verify, sinks;
-
-log = { arg s; ("[X-ENFORCE] " ++ s).postln };
-
-disableMeters = {
-    if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) {
-        AppClock.sched(0.0, { ~gui.enableMeters(false); nil });
-        AppClock.sched(0.05, { ~gui.enableMeters(false); nil });
-        log.("meters disabled");
-    };
-};
-
-getSinks = {
-    // Use effective lists so we match CURRENT/NEXT after any recent switch
-    sinks = ( current: ~mpb.effectiveCurrent[0], next: ~mpb.effectiveNext[0] );
-    log.("current=" ++ sinks[\current].asString ++ " next=" ++ sinks[\next].asString);
-};
-
-killNextHard = {
-    var nextSink = sinks[\next];
-    Server.default.bind({
-        // Source = hard silence, stereo bus; then kill monitor with pause+stop+end
-        Ndef(nextSink, { Silent.ar(2) });
-        Ndef(nextSink).ar(2);
-        Ndef(nextSink).fadeTime_(0.01);
-        // Kill monitor by every legal means; safe even if not playing
-        Ndef(nextSink).pause;
-        Ndef(nextSink).stop;
-        Ndef(nextSink).end(0.01);   // fades/ends any residual monitor synth
-    });
-    log.("NEXT " ++ nextSink.asString ++ " silenced and monitor ended");
-};
-
-ensureCurrent = {
-    var cur = sinks[\current];
-    Server.default.bind({
-        Ndef(cur, { \in.ar(2) });
-        Ndef(cur).ar(2);
-        Ndef(cur).fadeTime_(0.08);
-        if(Ndef(cur).isPlaying.not) { Ndef(cur).play(numChannels: 2) };
-    });
-    log.("CURRENT " ++ cur.asString ++ " robust+playing");
-};
-
-enableMeters = {
-    if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) {
-        ~gui.enableMeters(true);   // re-sends meter SynthDefs and guards AR buses
-        log.("meters re-enabled");
-    };
-};
-
-verify = {
-    AppClock.sched(0.35, {
-        var a = Ndef(\chainA).isPlaying;
-        var b = Ndef(\chainB).isPlaying;
-        ("[X-ENFORCE] [PLAY] A=% B=%".format(a, b)).postln;
-        nil
-    });
-};
-
-// run
-disableMeters.value;
-getSinks.value;
-killNextHard.value;
-ensureCurrent.value;
-enableMeters.value;
-verify.value;
-)
-// enforceExclusiveCurrentNow.scd
-// v0.2
-// MD 20250916
-
-
-(
-
-var listCurrent, listNext, currentSink, nextSink, postStatus, numCh;
-
-if(~mpb.isNil) { "[enforceExclusive] ~mpb is nil".warn; ^nil };
-
-listCurrent = ~mpb.currentChain;
-listNext    = ~mpb.nextChain;
-
-currentSink = listCurrent[0];
-nextSink    = listNext[0];
-
-numCh = (~mpb.respondsTo(\defaultNumChannels) ? ~mpb.defaultNumChannels) ?? { 2 };
-
-Server.default.bind({
-    // Rebuild both chains without resets; wiring via <<>
-    ~mpb.rebuildUnbound(listNext);     // should stop NEXT sink
-    ~mpb.rebuildUnbound(listCurrent);  // should play CURRENT sink
-
-    // Belt-and-braces: explicitly enforce state
-    if(Ndef(nextSink).isPlaying) { Ndef(nextSink).stop };
-    if(Ndef(currentSink).isPlaying.not) { Ndef(currentSink).play(numChannels: numCh) };
-});
-
-// Print status a short moment later (no server.sync)
-postStatus = {
-    AppClock.sched(0.20, {
-        var aPlaying, bPlaying, line;
-        aPlaying = Ndef(\chainA).isPlaying;
-        bPlaying = Ndef(\chainB).isPlaying;
-        line = "[status] A.playing=%  B.playing=%".format(aPlaying, bPlaying);
-        line.postln;
-        nil
-    });
-};
-postStatus.();
-)
-// fix_chain_current_exclusive.scd
-// v0.1
-// MD 20250916-1103
-
-(
-var log, ensureStereo, stopSinks, connectEffectiveCurrent;
-
-log = { arg m; ("[FIX] " ++ m).postln };
-
-ensureStereo = { arg keySym;
-    // Make sure every Ndef we will touch has a stereo bus
-    Ndef(keySym).ar(2);
-};
-
-stopSinks = {
-    // Stop both sinks so we can relaunch CURRENT cleanly
-    if(Ndef(\chainA).isPlaying) { Ndef(\chainA).stop };
-    if(Ndef(\chainB).isPlaying) { Ndef(\chainB).stop };
-    log.("stopped sinks chainA/chainB");
-};
-
-connectEffectiveCurrent = {
-    var eff, indexCounter, lastIndex, leftKey, rightKey, sinkKey;
-
-    // Compute CURRENT effective list from your pedalboard
-    eff = ~pedalboard.effectiveCurrent;
-
-    // Ensure stereo busses for all nodes involved
-    eff.do({ arg k; ensureStereo.(k) });
-
-    // Connect pairwise using the correct JITLib operator you use in this project
-    indexCounter = 0;
-    lastIndex = eff.size - 1;
-    while({ indexCounter < lastIndex }, {
-        leftKey  = eff[indexCounter];
-        rightKey = eff[indexCounter + 1];
-        Server.default.bind({
-            Ndef(leftKey) <<> Ndef(rightKey);
-        });
-        indexCounter = indexCounter + 1;
-    });
-
-    // Launch CURRENT sink only
-    sinkKey = eff[0];
-    Server.default.bind({
-        Ndef(sinkKey).play(numChannels: 2);
-    });
-
-    log.("reconnected CURRENT: " ++ eff);
-};
-
-// --- run the steps ---
-stopSinks.();
-connectEffectiveCurrent.();
-)
-// fix_current_exclusive_now.scd
-// v0.3
-// MD 20250916-1132
-
-(
-// 0) Stop any direct-to-out and both sinks first (clean slate)
-if(Ndef(\testmelody).isPlaying) { Ndef(\testmelody).stop; "[FIX] stopped \\testmelody direct".postln; };
-if(Ndef(\chainA).isPlaying)     { Ndef(\chainA).stop;     "[FIX] stopped \\chainA".postln; };
-if(Ndef(\chainB).isPlaying)     { Ndef(\chainB).stop;     "[FIX] stopped \\chainB".postln; };
-
-// 1) Ensure stereo busses (cheap no-op if already set)
-Ndef(\testmelody).ar(2);
-Ndef(\chainA).ar(2);
-
-// 2) Wire CURRENT explicitly with the correct JITLib operator you use in this project,
-//    and play CURRENT only (no chainB)
-Server.default.bind({
-    Ndef(\chainA) <<> Ndef(\testmelody);
-    Ndef(\chainA).play(numChannels: 2);
-});
-
-// 3) Quick status (target: testmelody=false, chainA=true, chainB=false)
-[\testmelody, \chainA, \chainB, \delay, \chorus].do({ arg nm;
-    ("[PLAY] " ++ nm ++ " = " ++ Ndef(nm).isPlaying).postln;
-});
-)
-// Fix_ExclusiveCurrent_EnforceNow.scd
-// v0.3
-// MD 20250916-1700
-
-//
-// Purpose: Force “CURRENT=A playing, NEXT=B stopped” deterministically, even if a prior crossfade
-//          or monitor tail keeps B reporting ‘playing’. Handles stop→pause→(last‑resort) clear+restore.
-// Style:   tilde vars, var-first, lowercase names, no server.sync, Server.default.bind for server ops.
-
-(
-var log, phase1_stopWithShortFade, phase2_pauseIfStill, phase3_lastResort, startAIfNeeded, verifyFinal;
-
-log = { arg s; ("[FIX] " ++ s).postln; };
-
-// Phase 1: small fades, stop B (start fade-down)
-phase1_stopWithShortFade = {
-    Server.default.bind({
-        Ndef(\chainA).fadeTime_(0.05);
-        Ndef(\chainB).fadeTime_(0.01);
-        Ndef(\chainB).stop;
-    });
-    log.("phase1: set fade A=0.05 B=0.01; B.stop");
-};
-
-// Phase 2: after short wait, pause B (hard drop of monitor) and ensure A is playing
-phase2_pauseIfStill = {
-    AppClock.sched(0.12, {
-        Server.default.bind({
-            if(Ndef(\chainB).isPlaying) { Ndef(\chainB).pause };  // kills monitor immediately
-            if(Ndef(\chainA).isPlaying.not) { Ndef(\chainA).play(numChannels: 2) };
-        });
-        log.("phase2: B.pause (if needed), A.play (if needed)");
-        nil
-    });
-};
-
-// Phase 3: last resort — if B still reports playing, clear + restore robust sink source
-phase3_lastResort = {
-    AppClock.sched(0.26, {
-        if(Ndef(\chainB).isPlaying) {
-            log.("phase3: B still playing -> clear+restore sink");
-            Server.default.bind({
-                // Replace B’s source with robust \in.ar(2) and reassert AR bus
-                Ndef(\chainB).clear(0);
-                Ndef(\chainB, { \in.ar(2) });
-                Ndef(\chainB).ar(2);
-            });
-        };
-        nil
-    });
-};
-
-// Safety: if A not playing after everything, start it
-startAIfNeeded = {
-    AppClock.sched(0.30, {
-        Server.default.bind({
-            if(Ndef(\chainA).isPlaying.not) { Ndef(\chainA).play(numChannels: 2) };
-            // ensure B is not audible
-            if(Ndef(\chainB).isPlaying) { Ndef(\chainB).pause };
-        });
-        nil
-    });
-};
-
-// Final verification
-verifyFinal = {
-    AppClock.sched(0.35, {
-        var a, b;
-        a = Ndef(\chainA).isPlaying;
-        b = Ndef(\chainB).isPlaying;
-        ("[PLAY] A=%  B=%".format(a, b)).postln;
-        nil
-    });
-};
-
-// Run the phases
-phase1_stopWithShortFade.value;
-phase2_pauseIfStill.value;
-phase3_lastResort.value;
-startAIfNeeded.value;
-verifyFinal.value;
-)
-// Fix_ForceStereo_And_Rebuild.scd
-// v0.1
-// MD 20250917-1155
-//
-// Purpose: Force ar(2) on every Ndef in CURRENT and NEXT effective lists,
-//          then rebuild both chains (uses <<> internally in your class).
-//          Lightweight, no rewiring here beyond your rebuildUnbound.
-// Style: tilde vars, var-first, lowercase names, no server.sync,
-//        server ops inside Server.default.bind.
-
-(
-var ensureStereo, touchAll, rebuildBoth, curEff, nxtEff;
-
-ensureStereo = { arg keySym; Ndef(keySym).ar(2) };
-
-curEff = ~mpb.effectiveCurrent;
-nxtEff = ~mpb.effectiveNext;
-
-Server.default.bind({
-    curEff.do({ arg k; ensureStereo.(k) });
-    nxtEff.do({ arg k; ensureStereo.(k) });
-    ~mpb.rebuildUnbound(~mpb.currentChain);  // uses Ndef(left) <<> Ndef(right)
-    ~mpb.rebuildUnbound(~mpb.nextChain);
-});
-
-// Post quick status afterwards
-AppClock.sched(0.25, {
-    ("[PLAY] A=% B=%"
-        .format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
-    nil
-});
-)
-// Fix_Now_BringUp_Recovery.scd
-// v0.1
-// MD 20250917-1136
-//
-// Purpose: Recover from early meter attach + channel wraps: disable meters,
-// ensure stereo sinks, define stereo ts0 (silent), ensure testmelody, re‑enforce
-// Option A exclusivity, then cleanly re‑enable meters.
-// Style: tilde vars, var-first, lowercase names, no server.sync,
-//        server ops inside Server.default.bind.
-
-(
-var log, ensureServer, disableMetersNow, ensureStereoSinks, defineTs0StereoSilent,
-    defineTestMelody, reassertExclusive, enableMetersClean, verify;
-
-log = { arg s; ("[RECOVER] " ++ s).postln };
-
-ensureServer = {
-    if(Server.default.serverRunning.not, { Server.default.boot });
-};
-
-disableMetersNow = {
-    if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) {
-        // do it twice on AppClock to beat any queued auto-enable
-        AppClock.sched(0.0, { ~gui.enableMeters(false); nil });
-        AppClock.sched(0.05, { ~gui.enableMeters(false); nil });
-        log.("meters disabled");
-    };
-};
-
-ensureStereoSinks = {
-    Server.default.bind({
-        Ndef(\chainA, { \in.ar(2) }); Ndef(\chainA).ar(2);
-        Ndef(\chainB, { \in.ar(2) }); Ndef(\chainB).ar(2);
-    });
-    log.("sinks set to robust stereo (\\in.ar)");
-};
-
-defineTs0StereoSilent = {
-    // make NEXT's default source unambiguously stereo to avoid 2→1 wraps
-    Server.default.bind({
-        Ndef(\ts0, { Silent.ar(2) });
-        Ndef(\ts0).ar(2);
-    });
-    log.("\\ts0 defined as stereo Silent");
-};
-
-defineTestMelody = {
-    Server.default.bind({
-        Ndef(\testmelody, {
-            var trig = Impulse.kr(3.2);
-            var seq  = Dseq([220, 277.18, 329.63, 392, 329.63, 277.18, 246.94], inf);
-            var f    = Demand.kr(trig, 0, seq);
-            var env  = Decay2.kr(trig, 0.01, 0.35);
-            var tone = SinOsc.ar(f) * env * 0.25;
-            var pan  = ToggleFF.kr(trig).linlin(0, 1, -0.6, 0.6);
-            Pan2.ar(tone, pan)
-        });
-        Ndef(\testmelody).ar(2);
-    });
-    log.("\\testmelody (stereo) ensured");
-};
-
-reassertExclusive = {
-    // Use class-level Option A (CURRENT audible; NEXT hard-silenced)
-    ~mpb.setSourceCurrent(\testmelody);
-    ~mpb.playCurrent;
-    ~mpb.enforceExclusiveCurrentOptionA(0.1);
-    log.("class-level exclusivity reasserted (Option A)");
-};
-
-enableMetersClean = {
-    // Your GUI’s enableMeters() re-sends SynthDefs each time
-    if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) {
-        ~gui.enableMeters(true);
-        log.("meters re-enabled");
-    };
-};
-
-verify = {
-    AppClock.sched(0.25, {
-        var a = Ndef(\chainA).isPlaying;
-        var b = Ndef(\chainB).isPlaying;
-        ("[PLAY] A=% B=%".format(a, b)).postln;
-        nil
-    });
-};
-
-// run
-ensureServer.value;
-disableMetersNow.value;
-ensureStereoSinks.value;
-defineTs0StereoSilent.value;
-defineTestMelody.value;
-reassertExclusive.value;
-enableMetersClean.value;
-verify.value;
-)
-// fixChainBSource.scd
-// v0.1
-// MD 20250917-1241
-
-~ct_applyOSCPathToMPB.("/setSource/testmelody", ~mpb, ~gui);
-~ct_applyOSCPathToMPB.("/add/delay", ~mpb, ~gui);  // optional FX on NEXT
-~ct_applyOSCPathToMPB.("/switch",    ~mpb, ~gui);
-// ForceStereoMold_Now.scd
-// v0.1
-// MD 20250917-1215
-//
-// Purpose: Pin sinks to 2ch audio using .mold (stronger than .ar)
-// Style: tilde vars, var-first, lowercase names, no server.sync,
-//        server ops inside Server.default.bind.
-
-(
-Server.default.bind({
-    Ndef(\chainA).mold(2, \audio);
-    Ndef(\chainB).mold(2, \audio);
-});
 )
 // helper_recover_if_silent.scd
 // v0.2
@@ -2861,6 +2043,149 @@ Server.default.bind({
 ~pedalboard.printChains;
 "[FIX] chainA <<> testmelody; chainA.play done.".postln;
 )
+// MagicDisplayGUI_ProcessorsHUD.scd
+// v0.2.1
+// MD 20250918-21:05 BST
+
+/*
+Purpose
+- Add a lightweight "Processors HUD" to the existing MagicDisplayGUI window.
+- Shows CURRENT and NEXT processor tails (symbols). Updates via ~procHud_update.
+
+Style
+- var-first in every function/closure; lowercase names; no server.sync; AppClock for GUI only;
+- one window only (install into the existing MagicDisplayGUI* window).
+*/
+
+(
+var symbolsToString, extractTail, findGuiWindow, clampRect, hudInstall, hudRender;
+
+/********** helpers **********/
+symbolsToString = { arg syms;
+    var namesArray, joined;
+    namesArray = syms.collect(_.asString);
+    joined = namesArray.join(" \u2192 "); // arrow
+    joined
+};
+
+extractTail = { arg chainArray;
+    var arr;
+    arr = chainArray ? [];
+    if(arr.size > 0) { arr.copyRange(1, arr.size - 1) } { [] }
+};
+
+findGuiWindow = {
+    var wins, target;
+    wins = Window.allWindows.select({ arg w;
+        var nm, isMagic;
+        nm = w.tryPerform(\name);
+        isMagic = nm.notNil and: { nm.asString.beginsWith("MagicDisplayGUI") };
+        isMagic
+    });
+    target = wins.last;
+    target
+};
+
+clampRect = { arg parentRect;
+    var x, y, w, h;
+    x = 10;
+    w = (parentRect.width - 20).max(160);
+    h = 46;
+    y = (parentRect.height - (h + 10)).max(10);
+    Rect(x, y, w, h)
+};
+
+/********** installer (explicit bounds; no FlowLayout; no caret returns) **********/
+hudInstall = {
+    AppClock.sched(0, {
+        var win, root, r, box, title, lineA, lineB, exists;
+
+        win = findGuiWindow.value;
+        if(win.notNil) {
+            root = win.view;
+
+            exists = (~procHud.notNil)
+                and: { ~procHud[\view].notNil }
+                and: { ~procHud[\view].isClosed.not };
+
+            if(exists.not) {
+                r = clampRect.value(root.bounds);
+
+                box = CompositeView(root, r)
+                    .background_(Color(0.12, 0.12, 0.12, 0.88));
+
+                title = StaticText(box, Rect(8, 6, (r.width - 16).max(80), 16))
+                    .string_("Processors HUD")
+                    .stringColor_(Color(0.9,0.9,0.9));
+
+                lineA = StaticText(box, Rect(8, 22, (r.width - 16).max(80), 16))
+                    .string_("CURRENT: -")
+                    .stringColor_(Color(0.9,0.9,0.9));
+
+                lineB = StaticText(box, Rect(8, 38, (r.width - 16).max(80), 16))
+                    .string_("NEXT:    -")
+                    .stringColor_(Color(0.8,0.8,0.8));
+
+                ~procHud = IdentityDictionary[
+                    \view        -> box,
+                    \lineCurrent -> lineA,
+                    \lineNext    -> lineB
+                ];
+
+                "[HUD] installed into MagicDisplayGUI".postln;
+            };
+        }{
+            "[HUD] MagicDisplayGUI window not found yet (install will retry on update)".postln;
+        };
+        nil
+    });
+};
+
+/********** renderer (safe guards; no caret returns) **********/
+hudRender = {
+    AppClock.sched(0, {
+        var ok, curArr, nextArr, curTail, nextTail, curStr, nextStr, lineA, lineB, alive;
+
+        ok = (~mpb.notNil);
+        if(ok) {
+            alive = (~procHud.notNil)
+                and: { ~procHud[\view].notNil }
+                and: { ~procHud[\view].isClosed.not };
+
+            if(alive.not) {
+                hudInstall.value;
+                AppClock.sched(0.07, { hudRender.value; nil });
+            }{
+                curArr  = ~mpb.effectiveCurrent;
+                nextArr = ~mpb.effectiveNext;
+
+                curTail = extractTail.value(curArr);
+                nextTail = extractTail.value(nextArr);
+
+                curStr = if(curTail.size > 0) { symbolsToString.value(curTail) } { "-" };
+                nextStr = if(nextTail.size > 0) { symbolsToString.value(nextTail) } { "-" };
+
+                lineA = ~procHud[\lineCurrent];
+                lineB = ~procHud[\lineNext];
+
+                if(lineA.notNil) { lineA.string = "CURRENT: " ++ curStr };
+                if(lineB.notNil) { lineB.string = "NEXT:    " ++ nextStr };
+            };
+        }{
+            "[HUD] cannot render (no ~mpb)".postln;
+        };
+        nil
+    });
+};
+
+/********** public API **********/
+~procHud_install = { hudInstall.value };
+~procHud_update  = { hudRender.value };
+
+// install & draw once
+~procHud_install.();
+AppClock.sched(0.10, { ~procHud_update.(); nil });
+)
 /* MagicProcessorLibrary_defs.scd
    Register a few defaults. Keep this file small and readable.
 */
@@ -3089,6 +2414,7 @@ Style
 */
 
 (
+/*("bob").postln;*/
 var log, need, ensureSources, verify, run;
 
 log = { arg s; ("[MILESTONE] " ++ s).postln };
@@ -3786,6 +3112,79 @@ enforceExclusiveBySilence.value;
 retargetMeters.value;
 verify.value;
 )
+// Patch_StartHere_Milestone_BringUpAndRun_freshBoot_Fix.scd
+// v0.1.4a
+// MD 20250918-18:02 BST
+
+/* Purpose
+   Replace the freshBoot step with a doWhenBooted-aware version that proceeds even if
+   the server is already booting. Avoids stalls at "already booting". No server.sync.
+
+   Style
+   - var-first in every function/closure; lowercase method names; no server.sync
+   - server ops inside Server.default.bind; GUI on AppClock
+*/
+
+(
+var replaceFreshBoot;
+
+replaceFreshBoot = {
+    var serverRef, didInitFlag, doInitTreeFunc, safeInitOnceFunc, startBootFunc;
+
+    serverRef = Server.default;
+    didInitFlag = false;
+
+    doInitTreeFunc = {
+        var ignore;
+        if(didInitFlag) { ^nil };
+        didInitFlag = true;
+        ignore = nil;
+        Server.default.bind({
+            serverRef.initTree;
+            serverRef.defaultGroup.freeAll;
+        });
+        MagicDisplay.setMeterChannels(2);
+        "[RUN] server tree inited; meter defs set to 2ch".postln;
+    };
+
+    safeInitOnceFunc = {
+        // Guard against multiple signals (doWhenBooted + polls)
+        if(serverRef.serverRunning) { doInitTreeFunc.value };
+    };
+
+    // Subscribe once; SC clears the function after it fires
+    serverRef.doWhenBooted({ AppClock.sched(0, { safeInitOnceFunc.value; nil }) });
+
+    if(serverRef.serverRunning) {
+        "[RUN] fresh boot: quitting current server…".postln;
+        serverRef.quit;
+        AppClock.sched(0.05, {
+            var waitDown;
+            waitDown = {
+                if(serverRef.serverRunning.not and: { serverRef.booting.not }) {
+                    serverRef.boot;
+                    nil
+                }{
+                    AppClock.sched(0.05, waitDown)
+                }
+            };
+            waitDown.value;
+            nil
+        });
+    }{
+        // server not running
+        if(serverRef.booting) {
+            "[RUN] server is already booting; will init when boot completes…".postln;
+            // doWhenBooted will trigger doInitTreeFunc
+        }{
+            "[RUN] fresh boot: starting server…".postln;
+            serverRef.boot;
+        };
+    };
+};
+
+freshBoot = replaceFreshBoot; // replace original binding in the script runtime
+)
 // prep_demo_audio_gui_current.scd
 // v0.1
 // MD 20250916-1046
@@ -4007,6 +3406,295 @@ ensureAudioRateAndReloadMeters = {
 };
 
 ensureAudioRateAndReloadMeters.();
+)
+// Run_Milestone_Today.scd
+// v0.1.0
+// MD 20250918-19:40 BST
+
+/* Purpose
+   - Run today's milestone playlist via the adapter, assuming runner v0.6 has already succeeded.
+   Style
+   - var-first in every closure; lowercase; no server.sync; server ops inside adapter/MPB.
+*/
+
+(
+var ok, log, guard, apply, run, gap, playlist;
+
+log = { arg s; var t; t = "[TOKENS] " ++ s; t.postln };
+
+ok = (~mpb.notNil) and: { ~gui.notNil } and: { ~ct_applyOSCPathToMPB.notNil };
+if(ok.not) {
+    "[TOKENS] Missing ~mpb/~gui or adapter. Run StartHere_* and load adapter first.".warn;
+    ^nil;
+};
+
+guard = {
+    var last;
+    last = ~mpb.effectiveNext.last;
+    if(last == \ts0) { log.("guard: NEXT ends with \\ts0 -> /setSource/testmelody"); ~ct_applyOSCPathToMPB.("/setSource/testmelody", ~mpb, ~gui) };
+};
+
+apply = { arg path;
+    var p;
+    p = path.asString;
+    log.("apply -> " ++ p);
+    ~ct_applyOSCPathToMPB.(p, ~mpb, ~gui);
+};
+
+run = {
+    var idx, count, step;
+    ~mpb.setSourcesBoth(\testmelody);
+    ~mpb.enforceExclusiveCurrentOptionA(0.1);
+    ~mpb.printChains;
+    ("[PLAY] A=% B=%".format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
+
+    idx = 0; count = playlist.size;
+    step = {
+        if(idx >= count) {
+            AppClock.sched(0.9, {
+                ("[PLAY] A=% B=%"
+                  .format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
+                ~mpb.printChains;
+                nil
+            });
+            ^nil
+        };
+        if(playlist[idx] == "/switch") { guard.value };
+        apply.value(playlist[idx]);
+        idx = idx + 1;
+        AppClock.sched(gap, step);
+    };
+    AppClock.sched(gap, step);
+};
+
+playlist = [
+    "/add/delay",
+    "/switch",
+    "/bypass/delay/on",
+    "/bypass/delay/off",
+    "/switch"
+];
+
+gap = 0.60;
+run.value;
+)
+// Run_Milestone_Today.scd
+// v0.2.1
+// MD 20250918-21:05 BST
+
+/*
+Purpose
+- Minimal, reliable milestone driver (no boot logic). Run main block once (sets up helpers + HUD),
+  then run the one-liners below, in order, to hear/see the expected changes.
+
+Style
+- var-first in every function/closure; lowercase methods; no server.sync;
+- server ops live inside adapter/MPB; GUI ops on AppClock; one window only; generated audio only;
+- JITLib connect operator remains exactly "<<>"; processors/sinks read from \in.ar(2).
+*/
+
+(
+// ---------- setup ----------
+
+var log, ensureAdapter, symbolsToString, extractTail, findGuiWindow;
+var hudInstall, hudRender, hudUpdate, wrapApply, primeToday, guardSwitch, stateLine;
+
+// small logger
+log = { arg s;
+    var line;
+    line = "[TOKENS] " ++ s;
+    line.postln;
+};
+
+// pretty chain printing
+symbolsToString = { arg syms;
+    var arr, joined;
+    arr = syms.collect(_.asString);
+    joined = arr.join(" \u2192 ");
+    joined
+};
+
+// drop leading \chainA / \chainB
+extractTail = { arg chainArray;
+    var arr;
+    arr = chainArray ? [];
+    if(arr.size > 0) { arr.copyRange(1, arr.size - 1) } { [] }
+};
+
+// find existing MagicDisplayGUI window
+findGuiWindow = {
+    var wins, target;
+    wins = Window.allWindows.select({ arg w;
+        var nm, isMagic;
+        nm = w.tryPerform(\name);
+        isMagic = nm.notNil and: { nm.asString.beginsWith("MagicDisplayGUI") };
+        isMagic
+    });
+    target = wins.last;
+    target
+};
+
+// Ensure adapter is loaded (absolute path, no loadRelative)
+ensureAdapter = {
+    var scriptDir, fileLower, fileCamel, ok, p, d;
+    scriptDir = ~scriptDir ?? {
+        p = thisProcess.nowExecutingPath;
+        d = if(p.notNil) { PathName(p).pathOnly } { thisProcess.cwd };
+        d
+    };
+    ok = (~ct_applyOSCPathToMPB.notNil);
+    if(ok.not) {
+        fileLower = (scriptDir +/+ "adapter_commandtree_to_magicpedalboard.scd").standardizePath;
+        fileCamel = (scriptDir +/+ "adapter_CommandTree_to_MagicPedalboard.scd").standardizePath;
+        if(File.exists(fileLower)) { fileLower.load; ok = true } {
+            if(File.exists(fileCamel)) { fileCamel.load; ok = true };
+        };
+    };
+    if(ok) { "[RUN] adapter is available".postln } { "[RUN] adapter missing — please load adapter file".warn };
+    ok
+};
+
+// HUD: install into existing MagicDisplayGUI (explicit bounds; no caret returns)
+hudInstall = {
+    AppClock.sched(0, {
+        var win, root, r, box, title, lineA, lineB, exists;
+
+        win = findGuiWindow.value;
+        if(win.notNil) {
+            root = win.view;
+
+            exists = (~procHud.notNil)
+                and: { ~procHud[\view].notNil }
+                and: { ~procHud[\view].isClosed.not };
+
+            if(exists.not) {
+                r = Rect(10, (root.bounds.height - 56).max(10), (root.bounds.width - 20).max(160), 46);
+
+                box = CompositeView(root, r)
+                    .background_(Color(0.12, 0.12, 0.12, 0.88));
+
+                title = StaticText(box, Rect(8, 6, (r.width - 16).max(80), 16))
+                    .string_("Processors HUD")
+                    .stringColor_(Color(0.9,0.9,0.9));
+
+                lineA = StaticText(box, Rect(8, 22, (r.width - 16).max(80), 16))
+                    .string_("CURRENT: -")
+                    .stringColor_(Color(0.9,0.9,0.9));
+
+                lineB = StaticText(box, Rect(8, 38, (r.width - 16).max(80), 16))
+                    .string_("NEXT:    -")
+                    .stringColor_(Color(0.8,0.8,0.8));
+
+                ~procHud = IdentityDictionary[
+                    \view        -> box,
+                    \lineCurrent -> lineA,
+                    \lineNext    -> lineB
+                ];
+
+                "[HUD] installed in MagicDisplayGUI".postln;
+            };
+        }{
+            "[HUD] MagicDisplayGUI window not found yet; run bring-up first".postln;
+        };
+        nil
+    });
+};
+
+// HUD: render (safe guards; no caret returns)
+hudRender = {
+    AppClock.sched(0, {
+        var alive, curArr, nextArr, curTail, nextTail, curStr, nextStr, lineA, lineB;
+
+        if(~mpb.notNil) {
+            alive = (~procHud.notNil)
+                and: { ~procHud[\view].notNil }
+                and: { ~procHud[\view].isClosed.not };
+
+            if(alive.not) {
+                hudInstall.value;
+                AppClock.sched(0.07, { hudRender.value; nil });
+            }{
+                curArr  = ~mpb.effectiveCurrent;
+                nextArr = ~mpb.effectiveNext;
+
+                curTail = extractTail.value(curArr);
+                nextTail = extractTail.value(nextArr);
+
+                curStr = if(curTail.size > 0) { symbolsToString.value(curTail) } { "-" };
+                nextStr = if(nextTail.size > 0) { symbolsToString.value(nextTail) } { "-" };
+
+                lineA = ~procHud[\lineCurrent];
+                lineB = ~procHud[\lineNext];
+
+                if(lineA.notNil) { lineA.string = "CURRENT: " ++ curStr };
+                if(lineB.notNil) { lineB.string = "NEXT:    " ++ nextStr };
+            };
+        }{
+            "[HUD] cannot render (no ~mpb)".postln;
+        };
+        nil
+    });
+};
+
+hudUpdate = { hudRender.value };
+
+// guard: ensure NEXT audible before /switch (avoid switching to \ts0)
+guardSwitch = {
+    var lastTail;
+    lastTail = ~mpb.effectiveNext.last;
+    if(lastTail == \ts0) {
+        log.("guard: NEXT ends with \\ts0 -> /setSource/testmelody");
+        ~ct_applyOSCPathToMPB.("/setSource/testmelody", ~mpb, ~gui);
+    };
+    hudRender.value;
+};
+
+// state print (what you should see)
+stateLine = {
+    var line;
+    ~mpb.printChains;
+    line = "[PLAY] A=% B=%".format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying);
+    line.postln;
+    hudRender.value;
+};
+
+// prime (for today's demo)
+primeToday = {
+    var ignore;
+    ignore = nil;
+    ~mpb.setSourcesBoth(\testmelody); // both tails end with testmelody
+    ~mpb.enforceExclusiveCurrentOptionA(0.1);
+    stateLine.value;
+};
+
+// apply wrapper: call adapter, then HUD update
+wrapApply = { arg pathString;
+    var p;
+    p = pathString.asString;
+    log.("apply -> " ++ p);
+    ~ct_applyOSCPathToMPB.(p, ~mpb, ~gui);
+    hudRender.value;
+};
+
+// ---------- publish helpers for your 1-liners ----------
+~tok = IdentityDictionary[
+    \apply       -> wrapApply,
+    \prime       -> primeToday,
+    \guardSwitch -> guardSwitch,
+    \state       -> stateLine,
+    \hudUpdate   -> hudUpdate,
+    \hudInstall  -> hudInstall
+];
+
+// ---------- sanity + first render ----------
+if((~mpb.isNil) or: { ~gui.isNil }) {
+    "[RUN] Bring-up not ready (~mpb/~gui). Run StartHere_CleanBoot_OneWindow_BringUp.scd first.".warn;
+}{
+    if(ensureAdapter.value) {
+        hudInstall.value;
+        AppClock.sched(0.10, { ~tok.state.(); nil });
+    };
+};
 )
 // saveonly_commandtree_current_to_json.scd
 // v0.2
@@ -4360,6 +4048,354 @@ waitOnMpbReady.value;
 
 // Kick off the sequence
 runSequence.value;
+)
+// StartHere_Milestone_BringUpAndRun.scd
+// v0.1.5b
+// MD 20250918-18:36 BST
+
+/*
+Purpose
+- Clean, deterministic bring-up (fresh boot) + today's CommandTree-mimic milestone playlist.
+- Simpler, robust boot sequencing: poll 'serverRunning'/'booting' (no doWhenBooted), so it proceeds
+  even if the server is already booting. Extra step logs to confirm progression.
+
+Style
+- tilde vars at top-level; var-first in every function/closure; lowercase method names; no server.sync;
+- server ops inside Server.default.bind; GUI ops on AppClock; JITLib operator exactly "<<>";
+- generated audio only (no SoundIn); sinks/processors read from \in.ar(2).
+*/
+
+(
+var log, step, pollUntil, freshBoot, makeGui, makeMpb, ensureSources;
+var settleBeforeMeters, loadAdapterRobust, installInlineAdapter;
+var waitOnMpbReadyThen, enableMetersAfterReady, runMilestone, runAll;
+var gapSeconds, meterDelaySec;
+
+// ---------- capture this script's directory once (for absolute loads) ----------
+~scriptDir = ~scriptDir ?? {
+    var pathString, dirString;
+    pathString = thisProcess.nowExecutingPath;
+    dirString = if(pathString.notNil) { PathName(pathString).pathOnly } { thisProcess.cwd };
+    dirString
+};
+("[DEBUG] scriptDir=" ++ ~scriptDir).postln;
+
+// ---------- small logger ----------
+log = { arg messageString;
+    var lineText;
+    lineText = "[RUN] " ++ messageString;
+    lineText.postln;
+};
+
+// terse step tagger
+step = { arg tag; ("[STEP] " ++ tag).postln };
+
+// ---------- generic AppClock poll (no server.sync) ----------
+pollUntil = { arg conditionFunc, everySeconds = 0.05, onOkFunc;
+    var tickFunc, secondsLocal, condFuncLocal, onOkLocal;
+    condFuncLocal = conditionFunc;
+    secondsLocal = everySeconds ? 0.05;
+    onOkLocal = onOkFunc ? { nil };
+    tickFunc = {
+        var okNow;
+        okNow = condFuncLocal.value;
+        if(okNow) { onOkLocal.value; nil } { AppClock.sched(secondsLocal, tickFunc) }
+    };
+    AppClock.sched(0, tickFunc);
+};
+
+// ---------- reset globals before start ----------
+~gui = nil;
+~mpb = nil;
+
+// ---------- 0) Fresh boot (polling): quit -> wait down -> boot -> wait up -> initTree ----------
+freshBoot = {
+    var serverRef, waitDown, waitUp, doInitTree;
+    serverRef = Server.default;
+
+    doInitTree = {
+        var ignore;
+        ignore = nil;
+        Server.default.bind({
+            serverRef.initTree;
+            serverRef.defaultGroup.freeAll;
+        });
+        MagicDisplay.setMeterChannels(2); // compile-time meter defs to 2ch
+        log.("server tree inited; meter defs set to 2ch");
+    };
+
+    waitUp = {
+        var cond;
+        cond = { serverRef.serverRunning };
+        pollUntil.value(cond, 0.05, {
+            doInitTree.value;
+        });
+    };
+
+    waitDown = {
+        var cond;
+        cond = { serverRef.serverRunning.not and: { serverRef.booting.not } };
+        pollUntil.value(cond, 0.05, {
+            log.("fresh boot: starting server…");
+            serverRef.boot;
+            waitUp.value;
+        });
+    };
+
+    if(serverRef.serverRunning or: { serverRef.booting }) {
+        log.("fresh boot: quitting current server…");
+        serverRef.quit;
+        // give the server a moment to start going down, then poll until fully down
+        AppClock.sched(0.05, { waitDown.value; nil });
+    }{
+        log.("fresh boot: starting server…");
+        serverRef.boot;
+        waitUp.value;
+    };
+};
+
+// ---------- 1) GUI: close old MagicDisplayGUI and create a fresh one ----------
+makeGui = {
+    var closeOldFunc;
+    closeOldFunc = {
+        var windowsList;
+        windowsList = Window.allWindows.select({ arg w;
+            var nameString, isMagic;
+            nameString = w.tryPerform(\name);
+            isMagic = nameString.notNil and: { nameString.asString.beginsWith("MagicDisplayGUI") };
+            isMagic
+        });
+        windowsList.do({ arg w; w.close });
+        log.("closed any existing MagicDisplayGUI windows");
+    };
+    AppClock.sched(0, {
+        closeOldFunc.value;
+        ~gui = MagicDisplayGUI.new;
+        nil
+    });
+};
+
+// ---------- 2) MPB: create AFTER GUI exists ----------
+makeMpb = {
+    pollUntil.value({ ~gui.notNil }, 0.05, {
+        AppClock.sched(0, {
+            ~mpb = MagicPedalboardNew.new(~gui);
+            log.("MagicPedalboardNew created");
+            nil
+        });
+    });
+};
+
+// ---------- 3) Sources (generated only) ----------
+ensureSources = {
+    Server.default.bind({
+        if(Ndef(\testmelody).source.isNil) {
+            Ndef(\testmelody, {
+                var trig, seq, freqSig, envAmp, panPos, outSig;
+                trig    = Impulse.kr(3.2);
+                seq     = Dseq([220,277.18,329.63,392,329.63,277.18,246.94], inf);
+                freqSig = Demand.kr(trig, 0, seq);
+                envAmp  = Decay2.kr(trig, 0.01, 0.35);
+                panPos  = ToggleFF.kr(trig).linlin(0,1,-0.6,0.6);
+                outSig  = Pan2.ar(SinOsc.ar(freqSig) * envAmp * 0.25, panPos);
+                outSig
+            });
+        };
+        Ndef(\testmelody).ar(2);
+        Ndef(\ts0, { Silent.ar(2) });
+        Ndef(\ts0).ar(2);
+    });
+    log.("sources ensured (\\testmelody stereo; \\ts0 silent stereo)");
+};
+
+// ---------- 4) Settle BEFORE meters: Option A + pin sinks (NO setSourcesBoth here) ----------
+settleBeforeMeters = {
+    pollUntil.value({ ~mpb.notNil }, 0.05, {
+        ~mpb.playCurrent;                         // deterministic CURRENT audible
+        ~mpb.enforceExclusiveCurrentOptionA(0.1); // NEXT silent at source
+
+        Server.default.bind({
+            Ndef(\chainA).mold(2, \audio);
+            Ndef(\chainB).mold(2, \audio);
+        });
+
+        ~mpb.printChains;
+        ("[PLAY] A=% B=%"
+            .format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
+    });
+};
+
+// ---------- 5) Adapter: absolute-load robustly; fallback to inline mini-adapter ----------
+installInlineAdapter = {
+    if(~ct_applyOSCPathToMPB.isNil) {
+        ~ct_applyOSCPathToMPB = { arg pathString, mpb, gui;
+            var tokens, normalized, verbLower, argsList, onOffStr, procSym, idxA, idxB, lastTail;
+            tokens = pathString.asString.split($/).reject({ arg t; t.isEmpty }).collect(_.asString);
+            normalized = if(tokens.size > 0 and: { tokens[0] == "commands" }) { tokens.copyRange(1, tokens.size - 1) } { tokens };
+            verbLower = (normalized.size > 0).if({ normalized[0].toLower }, { "" });
+            argsList  = (normalized.size > 1).if({ normalized.copyRange(1, normalized.size - 1) }, { [] });
+
+            switch(verbLower,
+                "add",      { if(argsList.size >= 1) { procSym = argsList[0].asSymbol; mpb.add(procSym) } },
+                "bypass",   {
+                    if(argsList.size >= 2) {
+                        procSym  = argsList[0].asSymbol;
+                        onOffStr = argsList[1].toLower;
+                        onOffStr = (["on","off","true","false","1","0"].includes(onOffStr)).if({
+                            if((onOffStr=="true") or: { onOffStr=="1" }) { "on" } { onOffStr }
+                        }, { "on" });
+                        mpb.bypass(procSym, onOffStr=="on");
+                    };
+                },
+                "removeat", { if(argsList.size >= 1) { mpb.removeAt(argsList[0].asInteger) } },
+                "swap",     { if(argsList.size >= 2) { idxA=argsList[0].asInteger; idxB=argsList[1].asInteger; mpb.swap(idxA, idxB) } },
+                "setsource",{ if(argsList.size >= 1) { mpb.setSource(argsList[0].asSymbol) } },
+                "switch",   {
+                    lastTail = mpb.effectiveNext.last;
+                    if(lastTail == \ts0) { mpb.setSource(\testmelody) }; // guard
+                    mpb.switchChain(0.12);
+                },
+                { /* ignore unknown */ }
+            );
+        };
+        log.("inline mini-adapter installed (fallback)");
+    };
+};
+
+loadAdapterRobust = {
+    var adapterFileLower, adapterFileCamel, existsLower, existsCamel;
+    if(~ct_applyOSCPathToMPB.notNil) {
+        log.("adapter already present");
+        ^this;
+    };
+    adapterFileLower = (~scriptDir +/+ "adapter_commandtree_to_magicpedalboard.scd").standardizePath;
+    adapterFileCamel = (~scriptDir +/+ "adapter_CommandTree_to_MagicPedalboard.scd").standardizePath;
+    existsLower = File.exists(adapterFileLower);
+    existsCamel = File.exists(adapterFileCamel);
+
+    if(existsLower) {
+        adapterFileLower.load; log.("adapter loaded: " ++ adapterFileLower);
+    }{
+        if(existsCamel) {
+            adapterFileCamel.load; log.("adapter loaded: " ++ adapterFileCamel);
+        }{
+            log.("adapter file not found near script; installing fallback");
+            installInlineAdapter.value;
+        };
+    };
+};
+
+// ---------- 6) Readiness gate only after ~mpb exists ----------
+waitOnMpbReadyThen = { arg onReadyFunc;
+    var onOkLocal;
+    onOkLocal = onReadyFunc ? { nil };
+    pollUntil.value({ ~mpb.notNil }, 0.05, {
+        ~mpb.waitUntilReady(2.5, 0.05, {
+            ("[PLAY] A=% B=%"
+                .format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
+            onOkLocal.value;
+        });
+    });
+};
+
+// ---------- 7) Re-enforce Option A and enable meters AFTER readiness (with a short delay) ----------
+enableMetersAfterReady = {
+    var postDelay;
+    postDelay = meterDelaySec ? 0.25; // small settle delay
+
+    AppClock.sched(postDelay, {
+        ~mpb.enforceExclusiveCurrentOptionA(0.1); // re-check exclusivity before meters
+
+        if(~gui.notNil and: { ~gui.respondsTo(\enableMeters) }) {
+            ~gui.enableMeters(false);
+            ~gui.enableMeters(true);
+            log.("meters enabled after readiness");
+        };
+        ("[CHECK] Ndef chain channels -> A:% , B:%"
+            .format(Ndef(\chainA).tryPerform(\numChannels), Ndef(\chainB).tryPerform(\numChannels))).postln;
+        nil
+    });
+};
+
+// ---------- 8) Milestone playlist (single prime sets sources) ----------
+runMilestone = {
+    var gapLocal, applyPathFunc, primeFunc, playlistArray, stepIndex, stepCount, stepFunc;
+    gapLocal = 0.60;
+
+    applyPathFunc = { arg pathString;
+        var lineText;
+        lineText = "[TOKENS] apply -> " ++ pathString;
+        lineText.postln;
+        ~ct_applyOSCPathToMPB.(pathString, ~mpb, ~gui);
+    };
+
+    primeFunc = {
+        ~mpb.setSourcesBoth(\testmelody);     // single place we set both tails today
+        ~mpb.enforceExclusiveCurrentOptionA(0.1);
+        ~mpb.printChains;
+        ("[PLAY] A=% B=%"
+            .format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
+    };
+
+    playlistArray = [
+        "/add/delay",
+        "/switch",
+        "/bypass/delay/on",
+        "/bypass/delay/off",
+        "/switch"
+    ];
+    stepIndex = 0;
+    stepCount = playlistArray.size;
+
+    stepFunc = {
+        var doneNow;
+        doneNow = (stepIndex >= stepCount);
+        if(doneNow) {
+            AppClock.sched(0.9, {
+                ("[PLAY] A=% B=%"
+                    .format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
+                ~mpb.printChains;
+                nil
+            });
+            ^nil
+        };
+        applyPathFunc.value(playlistArray[stepIndex]);
+        stepIndex = stepIndex + 1;
+        AppClock.sched(gapLocal, stepFunc);
+    };
+
+    primeFunc.value;
+    AppClock.sched(gapLocal, stepFunc);
+};
+
+// ---------- 9) Orchestrate strictly in order ----------
+runAll = {
+    var proceedAfterBoot;
+    proceedAfterBoot = {
+        makeGui.value;           step.("GUI");
+        makeMpb.value;           step.("MPB create");
+        ensureSources.value;     step.("sources");
+        settleBeforeMeters.value;step.("settle-before-meters");
+        loadAdapterRobust.value; step.("adapter");
+        waitOnMpbReadyThen.value({
+            enableMetersAfterReady.value; step.("meters");
+            runMilestone.value;          step.("playlist");
+        });
+    };
+    log.("orchestration start");
+    freshBoot.value;             step.("boot-in-progress");
+    // Continue once server is really running and tree initialized
+    pollUntil.value({ Server.default.serverRunning }, 0.05, {
+        // a tiny guard in case initTree hasn't run yet
+        AppClock.sched(0.10, { proceedAfterBoot.value; nil });
+    });
+};
+
+gapSeconds    = 0.60;
+meterDelaySec = 0.25;
+
+// fire
+runAll.value;
 )
 // Strict_Reset_To_Exclusive_Audible.scd
 // v0.1
