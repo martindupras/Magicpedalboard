@@ -432,6 +432,103 @@ ensureGuiAndPedalboard.value;
 startCurrent.value;
 verify.value;
 )
+// quickpatch.scd
+// Quick Patch — GUI/Audio sync + reliable GUI front
+// v0.1.0
+// MD 20250919-10:10 BST
+
+(
+
+/*
+Purpose
+- Keep MagicDisplayGUI columns/headers in sync with the actual CURRENT (A/B).
+- Remember the NEXT effect symbol so the right column shows something useful.
+- Wrap ~switchNow to refresh the GUI automatically after audio toggles.
+- Bring GUI window to the front; keep the grey UserDisplay behind.
+
+Style
+- var-first; lowercase; AppClock-only; no server.sync.
+*/
+
+var installGuiSync;
+
+installGuiSync = {
+    var ensureGuiFront, refreshFromState, wrapSwitch, hookApply;
+
+    ensureGuiFront = {
+        var gwin;
+        ~gui = ~gui ?? { MagicDisplayGUI_GridDemo.new };
+        if(~gui.respondsTo(\window)) {
+            gwin = ~gui.window;
+            if(gwin.notNil) { gwin.front; gwin.alwaysOnTop_(true) };
+        };
+        if(~ct.notNil and: { ~ct.display.notNil and: { ~ct.display.window.notNil } }) {
+            ~ct.display.window.alwaysOnTop_(false);
+        };
+        if(~gui.notNil) { ~gui.showExpectation("GUI ready; syncing with audio state…", 0) };
+        nil
+    };
+
+    refreshFromState = {
+        var current, next, effC, effN, bA, bB, effSym, nowA;
+        bA = []; bB = [];
+        effSym = ~nextEffectSym ? \delay;   // default if none chosen yet
+        nowA = (~currentIsA ? true);
+
+        if(~gui.isNil) { ^nil };
+
+        if(nowA) {
+            // CURRENT=A, NEXT=B
+            current = [\chainA, \testmelody];
+            next    = [\chainB, effSym, \testmelody];
+            ~gui.highlightCurrentColumn(\chainA);
+        }{
+            // CURRENT=B, NEXT=A
+            current = [\chainB, \testmelody];
+            next    = [\chainA, effSym, \testmelody];
+            ~gui.highlightCurrentColumn(\chainB);
+        };
+        effC = current; effN = next;
+
+        ~gui.showChainsDetailed(current, next, bA, bB, effC, effN);
+        nil
+    };
+
+    wrapSwitch = {
+        // decorate ~switchNow so it always refreshes the GUI after toggling
+        if(~switchNow.notNil) {
+            ~switchNow_raw = ~switchNow;
+            ~switchNow = {
+                ~switchNow_raw.();
+                AppClock.sched(0.02, { refreshFromState.value; nil });
+            };
+        };
+        nil
+    };
+
+    hookApply = {
+        // provide a helper the bridge (or you) can call that both applies FX and refreshes
+        ~applyCTEffect = { arg effSym;
+            ~nextEffectSym = effSym;
+            if(~applyToNext.notNil) { ~applyToNext.(effSym) };
+            AppClock.sched(0.02, { refreshFromState.value; nil });
+        };
+        nil
+    };
+
+    ensureGuiFront.value;
+    wrapSwitch.value;
+    hookApply.value;
+
+    // initial fill so the columns aren’t empty
+    AppClock.sched(0.01, { refreshFromState.value; nil });
+
+    "[PATCH] GUI sync installed".postln;
+    nil
+};
+
+AppClock.sched(0.0, { installGuiSync.value; nil });
+)
 // bootstrap_audio_and_fx_min.scd
 // v0.1
 
@@ -2043,6 +2140,166 @@ Server.default.bind({
 ~pedalboard.printChains;
 "[FIX] chainA <<> testmelody; chainA.play done.".postln;
 )
+// MagicDisplayGUI_ProcessorsHUD_TopLeft.scd
+// v0.3.2
+// MD 20250919-08:25 BST
+
+/*
+Purpose
+- Install a compact Processors HUD inside the existing MagicDisplayGUI window.
+- Anchored top-left; no FlowLayout; adequate height so the "NEXT" line never truncates.
+- Reflows width on update; safe to evaluate multiple times.
+- If ~mpb is available, shows CURRENT/NEXT processor tails; otherwise shows placeholders.
+
+Style
+- var-first; lowercase; AppClock-only GUI ops; no caret returns in AppClock closures; no server.sync.
+*/
+
+(
+var findGuiWindow, ensureHud, renderHud, makeRect, summarize, extractTail, clipStr, posCorner;
+
+posCorner = \topLeft;
+
+// helpers
+findGuiWindow = {
+    var windowsList, targetWindow;
+    windowsList = Window.allWindows.select({ arg w;
+        var nameStr, isMagic;
+        nameStr = w.tryPerform(\name);
+        isMagic = nameStr.notNil and: { nameStr.asString.beginsWith("MagicDisplayGUI") };
+        isMagic
+    });
+    targetWindow = windowsList.last;
+    targetWindow
+};
+
+makeRect = { arg parentRect;
+    var margin, minWidth, panelWidth, panelHeight, xPos, yPos;
+    margin = 10;
+    minWidth = 220;
+    panelHeight = 60; // title (16) + line (16) + line (16) + padding
+    panelWidth  = (parentRect.width - (margin * 2)).clip(minWidth, 10000);
+    xPos = if(posCorner == \topRight) { (parentRect.width - margin - panelWidth) } { margin };
+    yPos = margin;
+    Rect(xPos, yPos, panelWidth, panelHeight)
+};
+
+clipStr = { arg anyString, maxChars = 84;
+    var s;
+    s = anyString.asString;
+    if(s.size > maxChars) { s.copyRange(0, maxChars-3) ++ "…" } { s }
+};
+
+extractTail = { arg chainArray;
+    var arr;
+    arr = chainArray ? [];
+    if(arr.size > 0) { arr.copyRange(1, arr.size - 1) } { [] }
+};
+
+summarize = { arg syms;
+    var namesArr, joined;
+    namesArr = syms.collect(_.asString);
+    joined = namesArr.join(" -> ");
+    clipStr.value(joined, 84)
+};
+
+// installer
+ensureHud = {
+    AppClock.sched(0, {
+        var win, rootView, boxView, titleText, lineCurrent, lineNext, rect, exists;
+        win = findGuiWindow.value;
+        if(win.notNil) {
+            rootView = win.view;
+            exists = (~procHud.notNil) and: { ~procHud[\view].notNil } and: { ~procHud[\view].isClosed.not };
+            if(exists.not) {
+                rect = makeRect.value(rootView.bounds);
+                boxView = CompositeView(rootView, rect).background_(Color(0.12, 0.12, 0.12, 0.90));
+                titleText = StaticText(boxView, Rect(8, 6, rect.width - 16, 16))
+                    .string_("Processors")
+                    .stringColor_(Color(0.95, 0.95, 0.95));
+                lineCurrent = StaticText(boxView, Rect(8, 24, rect.width - 16, 16))
+                    .string_("CURRENT: -")
+                    .stringColor_(Color(0.90, 0.90, 0.90));
+                lineNext = StaticText(boxView, Rect(8, 42, rect.width - 16, 16)) // 42 avoids clipping
+                    .string_("NEXT: -")
+                    .stringColor_(Color(0.80, 0.80, 0.80));
+                ~procHud = IdentityDictionary[
+                    \view -> boxView,
+                    \lineCurrent -> lineCurrent,
+                    \lineNext -> lineNext
+                ];
+                "[HUD] installed (top-left)".postln;
+            };
+        }{
+            "[HUD] MagicDisplayGUI not found yet".postln;
+        };
+        nil
+    });
+};
+
+// renderer
+renderHud = {
+    AppClock.sched(0, {
+        var win, rootView, alive, rect, lineCurrent, lineNext;
+        var currentArr, nextArr, currentTail, nextTail, currentStr, nextStr, haveMpb;
+
+        win = findGuiWindow.value;
+        if(win.notNil) {
+            rootView = win.view;
+            alive = (~procHud.notNil) and: { ~procHud[\view].notNil } and: { ~procHud[\view].isClosed.not };
+            if(alive.not) {
+                ensureHud.value;
+                AppClock.sched(0.08, { renderHud.value; nil });
+            }{
+                rect = makeRect.value(rootView.bounds);
+                ~procHud[\view].bounds = rect;
+
+                haveMpb = (~mpb.notNil);
+                if(haveMpb) {
+                    currentArr = ~mpb.effectiveCurrent;
+                    nextArr    = ~mpb.effectiveNext;
+                    currentTail= extractTail.value(currentArr);
+                    nextTail   = extractTail.value(nextArr);
+                    currentStr = summarize.value(currentTail);
+                    nextStr    = summarize.value(nextTail);
+                }{
+                    currentStr = "-";
+                    nextStr    = "-";
+                };
+
+                lineCurrent = ~procHud[\lineCurrent];
+                lineNext    = ~procHud[\lineNext];
+                if(lineCurrent.notNil) {
+                    lineCurrent.bounds = Rect(8, 24, rect.width - 16, 16);
+                    lineCurrent.string = "CURRENT: " ++ currentStr;
+                };
+                if(lineNext.notNil) {
+                    lineNext.bounds = Rect(8, 42, rect.width - 16, 16);
+                    lineNext.string = "NEXT: " ++ nextStr;
+                };
+                ~procHud[\view].front;
+            };
+        }{
+            "[HUD] no MagicDisplayGUI; cannot render".postln;
+        };
+        nil
+    });
+};
+
+// public API
+~procHud_install  = { ensureHud.value };
+~procHud_update   = { renderHud.value };
+~procHud_relocate = { arg cornerSymbol;
+    var corner;
+    corner = cornerSymbol ? \topLeft;
+    posCorner = ([\topLeft, \topRight].includes(corner)).if({ corner }, { \topLeft });
+    renderHud.value;
+};
+
+// install & draw once
+~procHud_install.();
+AppClock.sched(0.10, { ~procHud_update.(); nil });
+)
 // MagicDisplayGUI_ProcessorsHUD.scd
 // v0.2.1
 // MD 20250918-21:05 BST
@@ -3286,6 +3543,103 @@ if(srcCode.notNil) {
 // 5) Inspect
 ~mpb.printChains;
 "[[PLAY]] A=%  B=%".format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying).postln;
+)
+// quickpatch.scd
+// Quick Patch — GUI/Audio sync + reliable GUI front
+// v0.1.0
+// MD 20250919-10:10 BST
+
+(
+
+/*
+Purpose
+- Keep MagicDisplayGUI columns/headers in sync with the actual CURRENT (A/B).
+- Remember the NEXT effect symbol so the right column shows something useful.
+- Wrap ~switchNow to refresh the GUI automatically after audio toggles.
+- Bring GUI window to the front; keep the grey UserDisplay behind.
+
+Style
+- var-first; lowercase; AppClock-only; no server.sync.
+*/
+
+var installGuiSync;
+
+installGuiSync = {
+    var ensureGuiFront, refreshFromState, wrapSwitch, hookApply;
+
+    ensureGuiFront = {
+        var gwin;
+        ~gui = ~gui ?? { MagicDisplayGUI_GridDemo.new };
+        if(~gui.respondsTo(\window)) {
+            gwin = ~gui.window;
+            if(gwin.notNil) { gwin.front; gwin.alwaysOnTop_(true) };
+        };
+        if(~ct.notNil and: { ~ct.display.notNil and: { ~ct.display.window.notNil } }) {
+            ~ct.display.window.alwaysOnTop_(false);
+        };
+        if(~gui.notNil) { ~gui.showExpectation("GUI ready; syncing with audio state…", 0) };
+        nil
+    };
+
+    refreshFromState = {
+        var current, next, effC, effN, bA, bB, effSym, nowA;
+        bA = []; bB = [];
+        effSym = ~nextEffectSym ? \delay;   // default if none chosen yet
+        nowA = (~currentIsA ? true);
+
+        if(~gui.isNil) { ^nil };
+
+        if(nowA) {
+            // CURRENT=A, NEXT=B
+            current = [\chainA, \testmelody];
+            next    = [\chainB, effSym, \testmelody];
+            ~gui.highlightCurrentColumn(\chainA);
+        }{
+            // CURRENT=B, NEXT=A
+            current = [\chainB, \testmelody];
+            next    = [\chainA, effSym, \testmelody];
+            ~gui.highlightCurrentColumn(\chainB);
+        };
+        effC = current; effN = next;
+
+        ~gui.showChainsDetailed(current, next, bA, bB, effC, effN);
+        nil
+    };
+
+    wrapSwitch = {
+        // decorate ~switchNow so it always refreshes the GUI after toggling
+        if(~switchNow.notNil) {
+            ~switchNow_raw = ~switchNow;
+            ~switchNow = {
+                ~switchNow_raw.();
+                AppClock.sched(0.02, { refreshFromState.value; nil });
+            };
+        };
+        nil
+    };
+
+    hookApply = {
+        // provide a helper the bridge (or you) can call that both applies FX and refreshes
+        ~applyCTEffect = { arg effSym;
+            ~nextEffectSym = effSym;
+            if(~applyToNext.notNil) { ~applyToNext.(effSym) };
+            AppClock.sched(0.02, { refreshFromState.value; nil });
+        };
+        nil
+    };
+
+    ensureGuiFront.value;
+    wrapSwitch.value;
+    hookApply.value;
+
+    // initial fill so the columns aren’t empty
+    AppClock.sched(0.01, { refreshFromState.value; nil });
+
+    "[PATCH] GUI sync installed".postln;
+    nil
+};
+
+AppClock.sched(0.0, { installGuiSync.value; nil });
 )
 // quickprep.scd
 // v0.1
@@ -4590,6 +4944,162 @@ doSwitch.value;
 afterSwitchCheck.value;
 recoverIfSilent.value;
 )
+// Test_CommandTree_To_AudioBridge.scd
+// v0.6.2
+// MD 20250919-09:16 BST
+
+/*
+Purpose
+- Bridge Command Tree -> Audio + GUI:
+  - Simulate 3–5–7 → \queue → \send (demo).
+  - Map OSC tokens (strings; hyphen-safe) to NEXT (B) effect.
+  - Ignore trivial paths like "/audio".
+  - Passive observer watches ~commandToSend for real SENDs.
+
+Style
+- var-first; AppClock-only; no server.sync.
+*/
+
+(
+var ensureDeps, buildEffectMap, simulatePath_3_5_7, queueAndSend, reflectOsc, startObserver;
+
+ensureDeps = {
+    var run;
+    run = {
+        if(~fx.isNil or: { ~applyToNext.isNil }) {
+            "[ERROR] Audio helpers not found. Run Test_MagicAudio_BringUp_A_B.scd first.".warn;
+        };
+        ~ct = ~ct ?? { CommandManager.new };
+        if(~ct.display.notNil and: { ~ct.display.window.notNil }) { ~ct.display.window.front };
+        if(~gui.isNil) { "[WARN] ~gui not present (GUI optional). Proceeding…".postln };
+        "[CT] CommandManager ready".postln;
+        nil
+    };
+    AppClock.sched(0.00, { run.value; nil });
+};
+
+buildEffectMap = {
+    var run;
+    run = {
+        ~ctFxMapS = IdentityDictionary[
+            "single-delay" -> \delay,
+            "delay"        -> \delay,
+            "echo"         -> \delay,
+            "freeverb"     -> \reverb,
+            "reverb"       -> \reverb,
+            "chorus"       -> \chorus,
+            "tremolo"      -> \tremolo,
+            "flanger"      -> \flanger
+        ];
+        "[CT] Effect token map (string-keyed) installed".postln;
+        nil
+    };
+    AppClock.sched(0.02, { run.value; nil });
+};
+
+reflectOsc = { arg pathStr;
+    var run;
+    run = {
+        var tokens, effTok, effSym, hasMeaning;
+        var current, next, effC, effN, bA, bB;
+
+        tokens = pathStr.asString.split($/).reject(_.isEmpty);
+        hasMeaning = (tokens.size >= 2); // ignore "/audio" or similar one-token paths
+        if(hasMeaning.not) {
+            ("[CT] Ignoring trivial path: " ++ pathStr).postln;
+        }{
+            effTok = tokens.reverse.detect({ arg t; ~ctFxMapS.includesKey(t.asString) });
+            effSym = (effTok.isNil).if({ \delay }, { ~ctFxMapS[effTok.asString] });
+
+            ~applyToNext.(effSym);
+
+            if(~gui.notNil) {
+                ~gui.showExpectation("CT SEND → " ++ pathStr, 0);
+                current = [\chainA, \testmelody];
+                next    = [\chainB, effSym, \testmelody];
+                effC = current; effN = next; bA=[]; bB=[];
+                ~gui.showChainsDetailed(current, next, bA, bB, effC, effN);
+            };
+        };
+        nil
+    };
+    AppClock.sched(0.00, { run.value; nil });
+};
+
+simulatePath_3_5_7 = {
+    var run;
+    run = {
+        var mm, gh;
+        mm = ~ct.midiManager; gh = mm.guitarHandler;
+
+        mm.setMode(mm.modes[\prog]); // resets nav, starts at string 6
+        gh.handleMessage(0, \noteOn, 43); 0.12.wait; // fret 3 on string 6
+        gh.handleMessage(1, \noteOn, 50); 0.12.wait; // fret 5 on string 5
+        gh.handleMessage(2, \noteOn, 57); 0.08.wait; // fret 7 on string 4
+
+        if(~gui.notNil) { ~gui.showExpectation("CT PROG: 3–5–7 reached. Queue when ready.", 0) };
+        nil
+    };
+    Routine({ run.value }).play(AppClock);
+};
+
+queueAndSend = {
+    var run;
+    run = {
+        var mm, path;
+        mm = ~ct.midiManager;
+        mm.setMode(mm.modes[\queue]); 0.08.wait;
+        mm.setMode(mm.modes[\send]);  0.08.wait;
+
+        path = ~ct.midiManager.queue.exportAsOSCPath;
+        ("[CT] OSC path exported: " ++ path).postln;
+        reflectOsc.value(path);
+
+        "[CT] Applied effect to NEXT; call ~switchNow.() to promote".postln;
+        nil
+    };
+    Routine({ run.value }).play(AppClock);
+};
+
+startObserver = {
+    var run;
+    run = {
+        var lastSeen;
+        lastSeen = "";
+        if(~ctObserver.notNil) { AppClock.clear(~ctObserver); ~ctObserver = nil };
+        ~ctObserver = AppClock.sched(0.20, {
+            var currentStr, tokens, hasMeaning;
+            currentStr = (~commandToSend ? "").asString;
+            if(currentStr.size > 0 and: { currentStr != lastSeen }) {
+                tokens = currentStr.split($/).reject(_.isEmpty);
+                hasMeaning = (tokens.size >= 2);
+                if(hasMeaning) {
+                    ("[CT OBS] detected SEND: " ++ currentStr).postln;
+                    reflectOsc.value(currentStr);
+                }{
+                    ("[CT OBS] ignoring trivial path: " ++ currentStr).postln;
+                };
+                lastSeen = currentStr;
+            };
+            0.20  // reschedule
+        });
+        "[CT] Observer started (listening to ~commandToSend)".postln;
+        nil
+    };
+    AppClock.sched(0.10, { run.value; nil });
+};
+
+// ---- run sequence ----
+ensureDeps.value;
+buildEffectMap.value;
+
+// Demo pass (comment out if using real controller later)
+AppClock.sched(0.25, { simulatePath_3_5_7.value; nil });
+AppClock.sched(1.10, { queueAndSend.value; nil });
+
+// Passive observer for real SENDs
+startObserver.value;
+)
 // test_editor_commandtree_add_demo_verbs_part_a.scd
 // v0.1
 // MD 20250916-0919
@@ -4691,6 +5201,219 @@ assert.(countBefore == countAfter, "idempotent: nodeMap size unchanged after sec
 // 3) Summary
 summary = "[TEST] Summary: PASS=" ++ passCount ++ " FAIL=" ++ failCount;
 summary.postln;
+)
+// Test_MagicAudio_BringUp_A_B.scd
+// v0.9.3
+// MD 20250919-09:16 BST
+
+/*
+Purpose
+- Robust audio bring-up (no SoundIn), Option A for NEXT:
+  - Atomic build into a dedicated root group (~mpRoot).
+  - A audible; B muted at source until switch.
+  - FX via Ndef(\chainX).filter dictionary.
+  - Helpers: ~applyToNext, ~clearNext, ~switchNow, ~audioReset.
+
+Style
+- var-first; lowercase; AppClock-only; no server.sync.
+*/
+
+(
+var boot, installFxDict, buildOnce, installHelpers, announce;
+var s;
+
+boot = {
+    var run;
+    run = {
+        s = Server.default;
+        s.waitForBoot({
+            Server.default.bind({
+                s.initTree;
+                s.defaultGroup.freeAll;
+            });
+            ("[AUDIO] server booted: " ++ s.addr).postln;
+        });
+        nil
+    };
+    AppClock.sched(0.00, { run.value; nil });
+};
+
+installFxDict = {
+    var run;
+    run = {
+        ~fx = IdentityDictionary[
+            \delay -> { arg in, time=0.35, decay=2.0, max=1.0;
+                time = time.clip(0.005, max);
+                CombC.ar(in, max, time, decay)
+            },
+            \reverb -> { arg in, mix=0.20, room=0.60, damp=0.50;
+                FreeVerb.ar(in, mix.clip(0,1), room.clip(0,1), damp.clip(0,1))
+            },
+            \chorus -> { arg in, depth=0.003, rate=0.25;
+                var mod;
+                mod = SinOsc.kr(rate).range(depth * -1, depth);
+                DelayC.ar(in, depth*2 + 0.01, mod + depth + 0.005)
+            },
+            \tremolo -> { arg in, rate=5, depth=0.6;
+                var lfo;
+                lfo = LFTri.kr(rate).range(1-depth, 1);
+                in * lfo
+            }
+        ];
+        "[FX] dictionary installed (\\delay, \\reverb, \\chorus, \\tremolo)".postln;
+        nil
+    };
+    AppClock.sched(0.02, { run.value; nil });
+};
+
+buildOnce = {
+    var run;
+    run = {
+        var lat, atomBuild, stopClear;
+        lat = s.latency ? 0.2;
+
+        atomBuild = {
+            // stop/clear any prior proxies quietly
+            stopClear = { arg name;
+                var p = Ndef(name);
+                if(p.isPlaying) { p.stop };
+                p.clear;
+            };
+            [\out, \mix, \chainA, \chainB, \srcA, \srcB].do(stopClear);
+
+            // new root group
+            if(~mpRoot.notNil) { try { ~mpRoot.free } };
+            ~mpRoot = Group.head(s);
+
+            // sources
+            Ndef(\srcA).fadeTime = 0.02;
+            Ndef(\srcA).source = { arg amp=0.20;
+                var t, seq, freq, sig;
+                t   = Impulse.kr(2);
+                seq = Demand.kr(t, 0, Dseq([220, 277, 247, 294, 330, 262], inf));
+                freq= Lag.kr(seq, 0.02);
+                sig = Mix.new(VarSaw.ar(freq * [1, 0.501], 0, 0.4)) * 0.35;
+                sig = LPF.ar(sig, 6000);
+                Pan2.ar(sig, 0) * amp;
+            };
+
+            Ndef(\srcB).fadeTime = 0.02;
+            Ndef(\srcB).source = { arg amp=0.20, muted=1;
+                var t, seq, freq, sig;
+                t   = Impulse.kr(2);
+                seq = Demand.kr(t, 0, Dseq([196, 233, 262, 220, 294, 247], inf));
+                freq= Lag.kr(seq, 0.02);
+                sig = Mix.new(VarSaw.ar(freq * [1, 0.503], 0, 0.4)) * 0.35;
+                sig = LPF.ar(sig, 5400);
+                sig = Pan2.ar(sig, 0) * amp;
+                Select.ar(muted.clip(0,1), [sig, Silent.ar(2)])
+            };
+
+            // chains
+            Ndef(\chainA).fadeTime = 0.02;
+            Ndef(\chainA).source = { Ndef(\srcA).ar };
+
+            Ndef(\chainB).fadeTime = 0.02;
+            Ndef(\chainB).source = { Ndef(\srcB).ar };
+
+            // mix and out
+            Ndef(\mix).fadeTime = 0.02;
+            Ndef(\mix).source = { Ndef(\chainA).ar + Ndef(\chainB).ar };
+
+            Ndef(\out).fadeTime = 0.02;
+            Ndef(\out).source = { Ndef(\mix).ar };
+
+            // play out into our group (positional group arg #6)
+            Ndef(\out).play(0, nil, ~mpRoot, 1.0, 1.0, 0.02, \addToHead);
+
+            // initial params
+            Ndef(\srcA).set(\amp, 0.20);
+            Ndef(\srcB).set(\amp, 0.20, \muted, 1); // Option A
+        };
+
+        s.makeBundle(lat, atomBuild);
+        AppClock.sched(lat + 0.05, { "[AUDIO] atomic graph built + out playing".postln; nil });
+        nil
+    };
+    AppClock.sched(0.04, { run.value; nil });
+};
+
+installHelpers = {
+    var run;
+    run = {
+        ~currentIsA = true;
+        ~ampA = 0.20; ~ampB = 0.20;
+
+        ~applyToNext = { arg fxSym, params = ( );
+            var f;
+            f = ~fx[fxSym];
+            if(f.isNil) {
+                ("[FX] unknown: " ++ fxSym).warn;
+            }{
+                Ndef(\chainB).filter(fxSym, f, params);
+                "[FX] applied to NEXT: ".post; fxSym.postln;
+            };
+        };
+
+        ~clearNext = {
+            Ndef(\chainB).clear;
+            Ndef(\chainB).source = { Ndef(\srcB).ar };
+            "[FX] NEXT cleared".postln;
+        };
+
+        ~switchNow = {
+            if(~currentIsA) {
+                Ndef(\srcA).set(\amp, 0.0);
+                Ndef(\srcB).set(\muted, 0, \amp, ~ampB);
+                ~currentIsA = false;
+                if(~gui.notNil) { ~gui.highlightCurrentColumn(\chainB) };
+                "[SWITCH] B is now CURRENT".postln;
+            }{
+                Ndef(\srcB).set(\amp, 0.0, \muted, 1);
+                Ndef(\srcA).set(\amp, ~ampA);
+                ~currentIsA = true;
+                if(~gui.notNil) { ~gui.highlightCurrentColumn(\chainA) };
+                "[SWITCH] A is now CURRENT".postln;
+            };
+        };
+
+        ~audioReset = {
+            var lat, doReset;
+            lat = s.latency ? 0.2;
+            doReset = {
+                [\out, \mix, \chainA, \chainB, \srcA, \srcB].do({ arg k;
+                    var p = Ndef(k);
+                    if(p.isPlaying) { p.stop };
+                    p.clear;
+                });
+                if(~mpRoot.notNil) { try { ~mpRoot.free } };
+            };
+            s.makeBundle(lat, doReset);
+            AppClock.sched(lat + 0.05, { buildOnce.value; nil });
+            "[AUDIO] reset requested".postln;
+        };
+
+        // initial GUI hint
+        if(~gui.notNil) { ~gui.highlightCurrentColumn(\chainA) };
+        nil
+    };
+    AppClock.sched(0.10, { run.value; nil });
+};
+
+announce = {
+    var run;
+    run = {
+        "[READY] Audio up. Helpers: ~applyToNext.(\\delay), ~clearNext.(), ~switchNow.(), ~audioReset.()".postln;
+        nil
+    };
+    AppClock.sched(0.12, { run.value; nil });
+};
+
+boot.value;
+installFxDict.value;
+buildOnce.value;
+installHelpers.value;
+announce.value;
 )
 /*
  * Test_MagicDisplayGUI_AllInOne_Monolithic.scd v0.10
@@ -5405,6 +6128,1189 @@ summary.postln;
     "Probe queued. Expect 'PROBE FRAME' in the Command area and AAA/BBB/CCC/DDD items in the lists."
     .postln;
 };
+)
+// Test_MagicDisplayGUI_LayoutOnly_v2.scd
+// v0.3.0
+// MD 20250919-08:45 BST
+
+/*
+Purpose
+- Bring up MagicDisplayGUI for visual-only testing and apply a NO-RECOMPILE layout fix:
+  1) Move the HUD to the top-right so it doesn't cover the columns.
+  2) Hide the Ops panel and reclaim the right-hand third for A/B columns.
+  3) Shrink the meters horizontally.
+- Populate CURRENT/NEXT with demo data and flip the CURRENT highlight every few seconds.
+
+Style
+- var-first; lowercase; AppClock-only GUI ops; no server.sync; one window named "MagicDisplayGUI*".
+*/
+
+(
+var closeMagicWindows, makeGui, populateListsOnce, cycleCurrentHighlight;
+var applyVisualFix, attachResizeFix;
+
+// -- close any existing MagicDisplayGUI* windows to be deterministic
+closeMagicWindows = {
+    AppClock.sched(0.0, {
+        var wins, count;
+        wins = Window.allWindows.select({ arg w;
+            var nm; nm = w.tryPerform(\name);
+            nm.notNil and: { nm.asString.beginsWith("MagicDisplayGUI") }
+        });
+        count = wins.size;
+        wins.do(_.close);
+        ("[GUI] closed " ++ count ++ " MagicDisplayGUI windows").postln;
+        nil
+    });
+};
+
+// -- create GUI; explicitly disable meters (no audio today)
+makeGui = {
+    AppClock.sched(0.05, {
+        ~gui = ~gui ?? { MagicDisplayGUI.new };
+        AppClock.sched(0.0, { ~gui.enableMeters(false); nil });
+        AppClock.sched(0.05, { ~gui.enableMeters(false); nil });
+        "[GUI] created; meters disabled".postln;
+        nil
+    });
+};
+
+// -- demo visual data
+populateListsOnce = {
+    AppClock.sched(0.15, {
+        var current, next, effC, effN, bypassA, bypassB, ops;
+        current = [\chainA, \delay, \chorus, \testmelody];
+        next    = [\chainB, \reverb, \testmelody];
+        bypassA = [\chorus];
+        bypassB = [];
+        effC = current; effN = next;
+        if(~gui.notNil) {
+            ~gui.showChainsDetailed(current, next, bypassA, bypassB, effC, effN);
+            ~gui.highlightCurrentColumn(\chainA);
+            ~gui.showExpectation("Visual-only layout test. No audio. No meters.", 0);
+
+            // Fill ops list so we can immediately hide it in the fix thereafter.
+            ops = ["insert delay", "switch", "bypass delay on", "bypass delay off", "switch"];
+            if(~gui.respondsTo(\setOperations)) {
+                ~gui.setOperations(ops);
+                ~gui.setNextAction({ arg idx; ("[ops] next index " ++ idx).postln; });
+            };
+        };
+        "[GUI] lists populated".postln;
+        nil
+    });
+};
+
+// -- flip current highlight every 3s (visual only)
+cycleCurrentHighlight = {
+    AppClock.sched(0.30, {
+        var isA, step;
+        isA = true;
+        step = {
+            if(~gui.notNil) {
+                if(isA) {
+                    ~gui.highlightCurrentColumn(\chainA);
+                    ~gui.showExpectation("CURRENT: A (visual highlight only)", 0);
+                }{
+                    ~gui.highlightCurrentColumn(\chainB);
+                    ~gui.showExpectation("CURRENT: B (visual highlight only)", 0);
+                };
+            };
+            isA = isA.not;
+        };
+        Routine({ 8.do({ step.value; 3.0.wait; }) }).play(AppClock);
+        nil
+    });
+};
+
+// ---- NO-RECOMPILE VISUAL FIX ----
+// Hide Ops panel, expand columns, shrink meters, park HUD top-right.
+// This works by walking the window's view tree (no need to access class ivars).
+applyVisualFix = {
+    AppClock.sched(0.25, {
+        var win, root, pad, colGap, metersH, expH, expGap, countH;
+        var winRect, colW, colH, leftX, rightX;
+
+        var compositeChildren, staticTexts, textViews, userViews, listViews, buttons, levelIndicators;
+
+        var guessPanels, isPanelColumn, headerString, leftPanelView, rightPanelView;
+        var expectationTextView, countdownLabelView, countdownBarView, metersGroupView;
+
+        // 0) grab window
+        win = Window.allWindows.detect({ arg w;
+            var nm; nm = w.tryPerform(\name);
+            nm.notNil and: { nm.asString.beginsWith("MagicDisplayGUI") }
+        });
+        if(win.isNil) {
+            "[FIX] MagicDisplayGUI window not found; skip.".postln; ^nil
+        };
+        root = win.view;
+
+        // 1) classify direct children
+        compositeChildren = root.children.select(_.isKindOf(CompositeView));
+        staticTexts       = root.children.select(_.isKindOf(StaticText));
+        textViews         = root.children.select(_.isKindOf(TextView));
+        userViews         = root.children.select(_.isKindOf(UserView));
+        listViews         = root.children.select(_.isKindOf(ListView));
+        buttons           = root.children.select(_.isKindOf(Button));
+
+        // 2) heuristics to identify parts
+        //    - left/right panels are CompositeViews that contain a ListView (their list)
+        //      and a StaticText header "CURRENT" / "NEXT"
+        isPanelColumn = { arg panel;
+            var hasList, hasHeader;
+            hasList = panel.children.any(_.isKindOf(ListView));
+            hasHeader = panel.children.any({ arg v;
+                (v.isKindOf(StaticText)) and: {
+                    headerString = v.tryPerform(\string);
+                    headerString.notNil and: {
+                        var s = headerString.asString.toUpper;
+                        (s.contains("CURRENT") or: { s.contains("NEXT") })
+                    }
+                }
+            });
+            hasList and: { hasHeader }
+        };
+        guessPanels = compositeChildren.select(isPanelColumn);
+        if(guessPanels.size >= 1) {
+            // pick the two widest as left/right
+            guessPanels = guessPanels.sortBy({ arg v; v.bounds.left });
+            leftPanelView  = guessPanels.first;
+            rightPanelView = (guessPanels.size > 1).if({ guessPanels.last }, { nil });
+        };
+
+        // expectation text = the only TextView child (class file creates one)
+        expectationTextView = textViews.first;
+
+        // countdown label = StaticText under expectation (we just move it with bounds)
+        countdownLabelView = staticTexts.detect({ arg st;
+            var y = st.bounds.top;
+            var txt = st.tryPerform(\string);
+            (txt.notNil) and: { y > ((expectationTextView.notNil).if({ expectationTextView.bounds.bottom }, { 0 })) }
+        });
+
+        // countdown bar = only UserView child (class file creates one)
+        countdownBarView = userViews.first;
+
+        // meters group = CompositeView child that contains LevelIndicator(s)
+        levelIndicators = root.children.select(_.isKindOf(LevelIndicator)); // not direct parent; we need group
+        metersGroupView = compositeChildren.detect({ arg cv;
+            cv.children.any(_.isKindOf(LevelIndicator))
+        });
+
+        // 3) compute new geometry
+        pad     = 10;
+        colGap  = 40;
+        metersH = 86;
+        expH    = 52;
+        expGap  = 6;
+        countH  = 20;
+
+        winRect = root.bounds;
+        // hide the Ops list/button/status (these live directly under root)
+        listViews.do(_.visible_(false));
+        buttons.do(_.visible_(false));
+        staticTexts.do({ arg st;
+            var txt = st.tryPerform(\string);
+            if(txt.notNil and: { txt.asString.beginsWith("Next:") }) { st.visible_(false) };
+        });
+
+        // recompute full-width (reclaim right third)
+        colW = ((winRect.width - (2 * pad) - colGap) / 2).max(220);
+        colH = (winRect.height
+            - (2 * pad)   // top + bottom
+            - metersH
+            - expH
+            - expGap
+            - countH
+            - 12).max(120);
+
+        leftX  = pad;
+        rightX = pad + colW + colGap;
+
+        // 4) apply bounds if we found the views
+        if(leftPanelView.notNil)  { leftPanelView.bounds  = Rect(leftX,  pad, colW, colH) };
+        if(rightPanelView.notNil) { rightPanelView.bounds = Rect(rightX, pad, colW, colH) };
+
+        if(expectationTextView.notNil) {
+            expectationTextView.bounds = Rect(leftX, leftPanelView.bounds.bottom + 6, colW * 2 + colGap, expH)
+        };
+        if(countdownLabelView.notNil and: { expectationTextView.notNil }) {
+            countdownLabelView.bounds = Rect(leftX, expectationTextView.bounds.bottom + expGap, 120, 20)
+        };
+        if(countdownBarView.notNil and: { expectationTextView.notNil }) {
+            countdownBarView.bounds = Rect(leftX + 130, expectationTextView.bounds.bottom + expGap,
+                (colW * 2 + colGap) - 140, 20)
+        };
+
+        // shrink meters width (e.g., 65% of columns span) and align left
+        if(metersGroupView.notNil) {
+
+            var groupLeft, groupTop, groupW, labelW, barW;
+			var bars;
+            groupLeft = pad;
+            groupTop  = winRect.height - metersH - pad;
+            groupW    = ((colW * 2 + colGap) * 0.65).clip(260, winRect.width - 2*pad);
+            metersGroupView.bounds = Rect(groupLeft, groupTop, groupW, metersH);
+
+            // child bars inside group (two rows)
+            labelW = 60;
+            barW   = groupW - labelW - 10;
+
+            // find the two LevelIndicator children and set their bounds
+            // (order is deterministic in your build: A first row, B second row)
+            bars = metersGroupView.children.select(_.isKindOf(LevelIndicator));
+            if(bars.size >= 1) { bars[0].bounds = Rect(labelW + 6, 4, barW, 20) };
+            if(bars.size >= 2) { bars[1].bounds = Rect(labelW + 6, 42, barW, 20) };
+        };
+
+        // park HUD top-right so it doesn't cover the columns
+        if(~procHud_relocate.notNil) {
+            ~procHud_relocate.(\topRight);
+            AppClock.sched(0.05, { if(~procHud_update.notNil) { ~procHud_update.() }; nil });
+        };
+
+        "[FIX] visual-only layout applied (ops hidden, columns expanded, meters shrunk, HUD top-right)".postln;
+        nil
+    });
+};
+
+// re-apply the layout fix on window resize
+attachResizeFix = {
+    AppClock.sched(0.28, {
+        var win;
+        win = Window.allWindows.detect({ arg w;
+            var nm = w.tryPerform(\name);
+            nm.notNil and: { nm.asString.beginsWith("MagicDisplayGUI") }
+        });
+        if(win.notNil) {
+            win.onResize = { applyVisualFix.value };
+        };
+        nil
+    });
+};
+
+// ---- Run sequence ----
+closeMagicWindows.value;
+makeGui.value;
+populateListsOnce.value;
+cycleCurrentHighlight.value;
+
+// If you already evaluated the Top-Left HUD file earlier, it will be moved to top-right.
+// If not, this fix still works without HUD.
+applyVisualFix.value;
+attachResizeFix.value;
+)
+// Test_MagicDisplayGUI_LayoutOnly_v3.scd
+// v0.3.3
+// MD 20250919-09:05 BST
+
+/*
+Purpose
+- Visual-only formatting test for MagicDisplayGUI (no audio, no meters).
+- Robustly wait for the window to be created (AppClock poll) before any layout tweaks.
+- Fixes you asked for:
+  1) Move HUD to top-right (so it doesn't cover columns).
+  2) Reclaim right-hand empty area by hiding ops panel if present.
+  3) Shrink meters horizontally.
+
+Style
+- var-first in every function/closure; lowercase method names; AppClock-only for GUI; no server.sync.
+- One window whose name begins with "MagicDisplayGUI".
+*/
+
+(
+var closeMagicWindows, makeGui, waitForGuiWindow, bringToFront,
+    populateListsOnce, cycleCurrentHighlight, applyVisualFix, attachResizeFix;
+
+// ---- A) Close pre-existing windows (deterministic start) ----
+closeMagicWindows = {
+    var run;
+    run = {
+        var wins, count;
+        wins = Window.allWindows.select({ arg w;
+            var nm;
+            nm = w.tryPerform(\name);
+            nm.notNil and: { nm.asString.beginsWith("MagicDisplayGUI") }
+        });
+        count = wins.size;
+        wins.do({ arg w; w.close });
+        ("[GUI] closed " ++ count ++ " MagicDisplayGUI windows").postln;
+        nil
+    };
+    AppClock.sched(0.00, { run.value; nil });
+};
+
+// ---- B) Create GUI and keep meters disabled (visual-only) ----
+makeGui = {
+    var run;
+    run = {
+        ~gui = ~gui ?? { MagicDisplayGUI.new };
+        // keep meters off (no audio)
+        ~gui.enableMeters(false);
+        ("[GUI] created; meters disabled").postln;
+        nil
+    };
+    AppClock.sched(0.05, { run.value; nil });
+};
+
+// ---- C) Wait until the MagicDisplayGUI window exists (AppClock poll) ----
+waitForGuiWindow = { arg timeoutSec = 2.0, pollSec = 0.05, onReadyFunc = nil;
+    var startTime, poll;
+    startTime = Main.elapsedTime;
+    poll = {
+        var win, have;
+        win = Window.allWindows.detect({ arg w;
+            var nm;
+            nm = w.tryPerform(\name);
+            nm.notNil and: { nm.asString.beginsWith("MagicDisplayGUI") }
+        });
+        have = win.notNil;
+        if(have) {
+            if(onReadyFunc.notNil) { onReadyFunc.value(win) };
+            nil
+        }{
+            if((Main.elapsedTime - startTime) > timeoutSec) {
+                "[WAIT] MagicDisplayGUI window not found (timeout)".warn;
+                nil
+            }{
+                AppClock.sched(pollSec, poll)
+            }
+        }
+    };
+    AppClock.sched(0.00, { poll.value; nil });
+    ^this
+};
+
+// ---- D) Bring the window to the front (belt-and-braces) ----
+bringToFront = { arg win;
+    var run;
+    run = {
+        if(win.notNil) {
+            win.front;
+            win.alwaysOnTop_(true);
+        };
+        nil
+    };
+    AppClock.sched(0.00, { run.value; nil });
+};
+
+// ---- E) Populate CURRENT/NEXT lists visually (no audio) ----
+populateListsOnce = {
+    var run;
+    run = {
+        var current, next, effC, effN, bypassA, bypassB, ops;
+        current  = [\chainA, \delay, \chorus, \testmelody];
+        next     = [\chainB, \reverb, \testmelody];
+        bypassA  = [\chorus];
+        bypassB  = [];
+        effC     = current;
+        effN     = next;
+        if(~gui.notNil) {
+            ~gui.showChainsDetailed(current, next, bypassA, bypassB, effC, effN);
+            ~gui.highlightCurrentColumn(\chainA);
+            ~gui.showExpectation("Visual-only layout test. No audio. No meters.", 0);
+            // Provide text for the ops list (non-interactive); may not exist on your build
+            ops = ["insert delay", "switch", "bypass delay on", "bypass delay off", "switch"];
+            if(~gui.respondsTo(\setOperations)) {
+                ~gui.setOperations(ops);
+                ~gui.setNextAction({ arg idx; ("[ops] next index " ++ idx).postln; });
+            };
+        };
+        ("[GUI] lists populated").postln;
+        nil
+    };
+    AppClock.sched(0.00, { run.value; nil });
+};
+
+// ---- F) Flip CURRENT highlight every ~3 seconds (visual only) ----
+cycleCurrentHighlight = {
+    var run;
+    run = {
+        var isA;
+        isA = true;
+        Routine({
+            8.do({
+                if(~gui.notNil) {
+                    if(isA) {
+                        ~gui.highlightCurrentColumn(\chainA);
+                        ~gui.showExpectation("CURRENT: A (visual highlight only)", 0);
+                    }{
+                        ~gui.highlightCurrentColumn(\chainB);
+                        ~gui.showExpectation("CURRENT: B (visual highlight only)", 0);
+                    };
+                };
+                isA = isA.not;
+                3.0.wait;
+            });
+        }).play(AppClock);
+        nil
+    };
+    AppClock.sched(0.25, { run.value; nil });
+};
+
+// ---- G) Visual fix: reclaim right space, shrink meters, move HUD top-right ----
+applyVisualFix = { arg win;
+    var run;
+    run = {
+        var root, pad, colGap, metersH, expH, expGap, countH;
+        var winRect, colW, colH, leftX, rightX;
+        var compositeChildren, staticTexts, textViews, userViews, listViews, buttons, levelIndicators;
+        var guessPanels, isPanelColumn, headerString, leftPanelView, rightPanelView;
+        var expectationTextView, countdownLabelView, countdownBarView, metersGroupView;
+
+        // guard
+        if(win.isNil) { ^nil };
+
+        root  = win.view;
+        pad   = 10;
+        colGap= 40;
+        metersH = 86;
+        expH    = 52;
+        expGap  = 6;
+        countH  = 20;
+
+        winRect = root.bounds;
+
+        // classify children (direct)
+        compositeChildren = root.children.select({ arg v; v.isKindOf(CompositeView) });
+        staticTexts       = root.children.select({ arg v; v.isKindOf(StaticText) });
+        textViews         = root.children.select({ arg v; v.isKindOf(TextView) });
+        userViews         = root.children.select({ arg v; v.isKindOf(UserView) });
+        listViews         = root.children.select({ arg v; v.isKindOf(ListView) });
+        buttons           = root.children.select({ arg v; v.isKindOf(Button) });
+        levelIndicators   = root.children.select({ arg v; v.isKindOf(LevelIndicator) }); // probably empty; bars live under meters group
+
+        // locate left/right column panels via heuristics
+        isPanelColumn = { arg panel;
+            var hasList, hasHeader;
+            hasList   = panel.children.any({ arg c; c.isKindOf(ListView) });
+            hasHeader = panel.children.any({ arg c;
+                var t;
+                t = (c.isKindOf(StaticText)).if({ c.tryPerform(\string) }, { nil });
+                t.notNil and: {
+                    var s;
+                    s = t.asString.toUpper;
+                    s.contains("CURRENT") or: { s.contains("NEXT") }
+                }
+            });
+            hasList and: { hasHeader }
+        };
+        guessPanels = compositeChildren.select(isPanelColumn).sortBy({ arg v; v.bounds.left });
+        leftPanelView  = (guessPanels.size >= 1).if({ guessPanels[0] }, { nil });
+        rightPanelView = (guessPanels.size >= 2).if({ guessPanels[1] }, { nil });
+
+        expectationTextView = textViews.first;         // created in class
+        countdownBarView    = userViews.first;         // created in class
+        countdownLabelView  = staticTexts.detect({ arg st;
+            var lbok, txt, y, expBottom;
+            txt = st.tryPerform(\string);
+            y   = st.bounds.top;
+            expBottom = (expectationTextView.notNil).if({ expectationTextView.bounds.bottom }, { 0 });
+            lbok = txt.notNil and: { y > expBottom };
+            lbok
+        });
+
+        // hide ops area if present
+        listViews.do({ arg lv; lv.visible_(false) });
+        buttons.do({ arg b; b.visible_(false) });
+        staticTexts.do({ arg st;
+            var txt;
+            txt = st.tryPerform(\string);
+            if(txt.notNil and: { txt.asString.beginsWith("Next:") }) { st.visible_(false) };
+        });
+
+        // recompute two column geometry across full width
+        colW = ((winRect.width - (2 * pad) - colGap) / 2).max(220);
+        colH = (winRect.height - (2 * pad) - metersH - expH - expGap - countH - 12).max(120);
+        leftX  = pad;
+        rightX = pad + colW + colGap;
+
+        if(leftPanelView.notNil)  { leftPanelView.bounds  = Rect(leftX,  pad, colW, colH) };
+        if(rightPanelView.notNil) { rightPanelView.bounds = Rect(rightX, pad, colW, colH) };
+
+        if(expectationTextView.notNil and: { leftPanelView.notNil }) {
+            expectationTextView.bounds = Rect(leftX, leftPanelView.bounds.bottom + 6, colW * 2 + colGap, expH)
+        };
+        if(countdownLabelView.notNil and: { expectationTextView.notNil }) {
+            countdownLabelView.bounds = Rect(leftX, expectationTextView.bounds.bottom + expGap, 120, 20)
+        };
+        if(countdownBarView.notNil and: { expectationTextView.notNil }) {
+            countdownBarView.bounds = Rect(leftX + 130, expectationTextView.bounds.bottom + expGap,
+                (colW * 2 + colGap) - 140, 20)
+        };
+
+        // locate meters group: CompositeView child that contains LevelIndicators
+        metersGroupView = compositeChildren.detect({ arg cv;
+            cv.children.any({ arg c; c.isKindOf(LevelIndicator) })
+        });
+
+        // shrink meters width to 60% of columns span and align left
+        if(metersGroupView.notNil) {
+            var groupLeft, groupTop, groupW, labelW, barW, bars;
+            groupLeft = pad;
+            groupTop  = winRect.height - metersH - pad;
+            groupW    = ((colW * 2 + colGap) * 0.60).clip(240, winRect.width - 2*pad);
+            metersGroupView.bounds = Rect(groupLeft, groupTop, groupW, metersH);
+
+            // child indicators (two rows: A/B)
+            labelW = 60;
+            barW   = groupW - labelW - 10;
+            bars   = metersGroupView.children.select({ arg v; v.isKindOf(LevelIndicator) });
+            if(bars.size >= 1) { bars[0].bounds = Rect(labelW + 6, 4,  barW, 20) };
+            if(bars.size >= 2) { bars[1].bounds = Rect(labelW + 6, 42, barW, 20) };
+        };
+
+        // move HUD to top-right (if the helpers exist)
+        if(~procHud_relocate.notNil) {
+            ~procHud_relocate.(\topRight);
+            AppClock.sched(0.05, { if(~procHud_update.notNil) { ~procHud_update.() }; nil });
+        };
+
+        "[FIX] visual-only layout applied (ops hidden if present, columns expanded, meters shrunk, HUD top-right)".postln;
+        nil
+    };
+    AppClock.sched(0.00, { run.value; nil });
+};
+
+// ---- H) Reapply fix on window resize ----
+attachResizeFix = { arg win;
+    var run;
+    run = {
+        if(win.notNil) {
+            win.onResize = { applyVisualFix.value(win) };
+        };
+        nil
+    };
+    AppClock.sched(0.00, { run.value; nil });
+};
+
+// ---- Sequence ----
+closeMagicWindows.value;
+makeGui.value;
+
+waitForGuiWindow.value(
+    3.0, 0.05,
+    { arg win;
+        bringToFront.value(win);
+        populateListsOnce.value;
+        cycleCurrentHighlight.value;
+        applyVisualFix.value(win);
+        attachResizeFix.value(win);
+    }
+);
+)
+// Test_MagicDisplayGUI_LayoutOnly_v4.scd
+// v0.4.0
+// MD 20250919-09:25 BST
+
+/*
+Purpose
+- Visual-only formatting test for MagicDisplayGUI with a bottom-docked "Processors" panel.
+- Resizes the main window to ~1340 px width (and taller), disables meters, and uses GridLayout
+  to render CURRENT/NEXT processor strings at the bottom (no overlap with columns).
+- Narrows meters group width to avoid wasting the right third.
+
+Style
+- var-first in every function/closure; lowercase names; AppClock-only GUI ops; no server.sync.
+- One window whose name begins with "MagicDisplayGUI".
+*/
+
+(
+var closeMagicWindows, makeGui, waitForWindow, bringToFront,
+    populateLists, buildBottomHud, refreshBottomHud, shrinkMeters, attachResize,
+    winWantedW, winWantedH, hudH;
+
+// ---- configuration ----
+winWantedW = 1340;   // your requested width
+winWantedH = 900;    // a bit taller to make room for the bottom panel
+hudH       = 88;     // bottom panel height (dark grey)
+
+closeMagicWindows = {
+    var run;
+    run = {
+        var wins, count;
+        wins = Window.allWindows.select({ arg w;
+            var nm; nm = w.tryPerform(\name);
+            nm.notNil and: { nm.asString.beginsWith("MagicDisplayGUI") }
+        });
+        count = wins.size;
+        wins.do({ arg w; w.close });
+        ("[GUI] closed " ++ count ++ " MagicDisplayGUI windows").postln;
+        nil
+    };
+    AppClock.sched(0.00, { run.value; nil });
+};
+
+makeGui = {
+    var run;
+    run = {
+        ~gui = ~gui ?? { MagicDisplayGUI.new };
+        // Visual-only = meters off
+        ~gui.enableMeters(false);
+        "[GUI] created; meters disabled".postln;
+        nil
+    };
+    AppClock.sched(0.05, { run.value; nil });
+};
+
+waitForWindow = { arg timeoutSec = 3.0, pollSec = 0.05, onReadyFunc = nil;
+    var startTime, poll;
+    startTime = Main.elapsedTime;
+    poll = {
+        var win, have;
+        win = Window.allWindows.detect({ arg w;
+            var nm; nm = w.tryPerform(\name);
+            nm.notNil and: { nm.asString.beginsWith("MagicDisplayGUI") }
+        });
+        have = win.notNil;
+        if(have) {
+            if(onReadyFunc.notNil) { onReadyFunc.value(win) };
+            nil
+        }{
+            if((Main.elapsedTime - startTime) > timeoutSec) {
+                "[WAIT] MagicDisplayGUI window not found (timeout)".warn; nil
+            }{
+                AppClock.sched(pollSec, poll)
+            }
+        }
+    };
+    AppClock.sched(0.00, { poll.value; nil });
+    ^this
+};
+
+bringToFront = { arg win;
+    var run;
+    run = {
+        var x, y;
+        if(win.notNil) {
+            // Set to requested size; keep top-left where it is
+            x = win.bounds.left; y = win.bounds.top;
+            win.bounds = Rect(x, y, winWantedW, winWantedH);
+            win.front; win.alwaysOnTop_(true);
+        };
+        nil
+    };
+    AppClock.sched(0.00, { run.value; nil });
+};
+
+// Populate column lists with visual-only demo text
+populateLists = {
+    var run;
+    run = {
+        var current, next, effC, effN, bypassA, bypassB;
+        current  = [\chainA, \delay, \chorus, \testmelody];
+        next     = [\chainB, \reverb, \testmelody];
+        bypassA  = [\chorus];
+        bypassB  = [];
+        effC = current; effN = next;
+        if(~gui.notNil) {
+            ~gui.showChainsDetailed(current, next, bypassA, bypassB, effC, effN);
+            ~gui.highlightCurrentColumn(\chainA);
+            ~gui.showExpectation("Visual-only: bottom Processors panel (GridLayout), meters disabled.", 0);
+        };
+        "[GUI] lists populated".postln;
+        nil
+    };
+    AppClock.sched(0.00, { run.value; nil });
+};
+
+// Build bottom-docked Processors panel using GridLayout
+// Exposes ~bottomHud and ~bottomHud_update
+buildBottomHud = { arg win;
+    var run;
+    run = {
+        var root, pad, panelRect, hud, grid, title, curLabel, curText, nextLabel, nextText;
+        var boundsNow;
+        if(win.isNil) { ^nil };
+        root = win.view;
+        pad  = 10;
+        boundsNow = root.bounds;
+
+        panelRect = Rect(
+            pad,
+            boundsNow.height - hudH - pad,   // dock at bottom
+            boundsNow.width  - (2 * pad),
+            hudH
+        );
+
+        // Create once; reuse if present
+        if(~bottomHud.notNil and: { ~bottomHud.isClosed.not }) {
+            ~bottomHud.bounds = panelRect;
+        }{
+            hud = CompositeView(root, panelRect)
+                .background_(Color(0.12, 0.12, 0.12, 0.92));
+            // Use GridLayout for clean alignment and stretching:
+            // We'll make 2 columns: [label][content], 3 rows: title (span 2 cols), current, next.
+            grid = GridLayout.new;
+            hud.layout = grid;
+
+            title     = StaticText(hud).string_("Processors").stringColor_(Color(0.95, 0.95, 0.95));
+            curLabel  = StaticText(hud).string_("CURRENT:").stringColor_(Color(0.90, 0.90, 0.90));
+            curText   = StaticText(hud).string_("–").stringColor_(Color(0.90, 0.90, 0.90));
+            nextLabel = StaticText(hud).string_("NEXT:").stringColor_(Color(0.80, 0.80, 0.80));
+            nextText  = StaticText(hud).string_("–").stringColor_(Color(0.80, 0.80, 0.80));
+
+            // Place items (row, col, rows, cols); stretch right column
+            grid.add(title,     0, 0, 1, 2);  // span 2 columns
+            grid.add(curLabel,  1, 0);
+            grid.add(curText,   1, 1);
+            grid.add(nextLabel, 2, 0);
+            grid.add(nextText,  2, 1);
+            grid.setColumnStretch(1, 1);  // right column grows
+            grid.setRowStretch(0, 0);     // title fixed
+            grid.setRowStretch(1, 1);     // rows get space if needed
+            grid.setRowStretch(2, 1);
+            grid.hSpacing = 10; grid.vSpacing = 4;
+
+            // remember components for future updates
+            ~bottomHud = IdentityDictionary[
+                \view     -> hud,
+                \curText  -> curText,
+                \nextText -> nextText
+            ];
+            "[HUD] bottom (GridLayout) installed".postln;
+        };
+
+        // Provide updater function
+        ~bottomHud_update = {
+            var getTail, summarize, curArr, nxtArr, curTail, nxtTail, curStr, nxtStr;
+            getTail = { arg arr; if(arr.isNil or: { arr.size < 2 }) { [] } { arr.copyRange(1, arr.size-1) } };
+            summarize = { arg syms;
+                var names, joined;
+                names = syms.collect(_.asString);
+                joined = names.join("  ->  ");
+                if(joined.size > 96) { joined.copyRange(0, 93) ++ "…" } { joined }
+            };
+            if(~mpb.notNil) {
+                curArr = ~mpb.effectiveCurrent;
+                nxtArr = ~mpb.effectiveNext;
+                curTail = getTail.value(curArr);
+                nxtTail = getTail.value(nxtArr);
+                curStr = summarize.value(curTail);
+                nxtStr = summarize.value(nxtTail);
+            }{
+                // Visual demo fallback
+                curStr = "delay  ->  chorus  ->  testmelody";
+                nxtStr = "reverb ->  testmelody";
+            };
+            if(~bottomHud.notNil) {
+                (~bottomHud[\curText]).string = curStr;
+                (~bottomHud[\nextText]).string = nxtStr;
+            };
+        };
+
+        // first fill
+        AppClock.sched(0.00, { ~bottomHud_update.value; nil });
+        nil
+    };
+    AppClock.sched(0.00, { run.value; nil });
+};
+
+// Narrow the meters group width so it doesn’t force a wide layout
+shrinkMeters = { arg win;
+    var run;
+    run = {
+        var root, pad, metersH, winRect, compositeChildren, metersGroupView, groupLeft, groupTop, groupW, labelW, barW, bars;
+        if(win.isNil) { ^nil };
+        root     = win.view;
+        pad      = 10;
+        metersH  = 86;
+        winRect  = root.bounds;
+        compositeChildren = root.children.select({ arg v; v.isKindOf(CompositeView) });
+        // meters group: CompositeView child that contains LevelIndicators
+        metersGroupView = compositeChildren.detect({ arg cv; cv.children.any({ arg c; c.isKindOf(LevelIndicator) }) });
+        if(metersGroupView.notNil) {
+            groupLeft = pad;
+            groupTop  = winRect.height - metersH - pad;
+            groupW    = (winRect.width * 0.55).clip(240, winRect.width - 2*pad); // ~55% width
+            metersGroupView.bounds = Rect(groupLeft, groupTop, groupW, metersH);
+
+            labelW = 60;
+            barW   = groupW - labelW - 10;
+            bars   = metersGroupView.children.select({ arg v; v.isKindOf(LevelIndicator) });
+            if(bars.size >= 1) { bars[0].bounds = Rect(labelW + 6, 4,  barW, 20) };
+            if(bars.size >= 2) { bars[1].bounds = Rect(labelW + 6, 42, barW, 20) };
+            "[METERS] narrowed".postln;
+        }{
+            "[METERS] group not found (ok on some builds)".postln;
+        };
+        nil
+    };
+    AppClock.sched(0.00, { run.value; nil });
+};
+
+// Re-apply on resize (keeps HUD docked at bottom & meters narrow)
+attachResize = { arg win;
+    var run;
+    run = {
+        if(win.notNil) {
+            win.onResize = {
+                var x, y, w, h, root, pad, hud;
+                // keep width near your requested target if you resize huge
+                root = win.view; pad = 10;
+                w = win.bounds.width; h = win.bounds.height;
+                // reposition HUD
+                if(~bottomHud.notNil) {
+                    hud = ~bottomHud[\view];
+                    if(hud.notNil and: { hud.isClosed.not }) {
+                        hud.bounds = Rect(pad, root.bounds.height - hudH - pad, root.bounds.width - (2*pad), hudH);
+                    };
+                };
+                // keep meters narrow
+                shrinkMeters.value(win);
+                // refresh strings (if ~mpb present)
+                if(~bottomHud_update.notNil) {
+                    AppClock.sched(0.00, { ~bottomHud_update.value; nil });
+                };
+            };
+        };
+        nil
+    };
+    AppClock.sched(0.00, { run.value; nil });
+};
+
+// ---- run sequence ----
+closeMagicWindows.value;
+makeGui.value;
+
+waitForWindow.value(
+    3.0, 0.05,
+    { arg win;
+        bringToFront.value(win);
+        populateLists.value;
+        buildBottomHud.value(win);
+        shrinkMeters.value(win);
+        attachResize.value(win);
+    }
+);
+)
+// Test_MagicDisplayGUI_LayoutOnly.scd
+// v0.3.9
+// MD 20250919-10:46 BST
+
+/*
+Purpose
+- Visual-only demo for MagicDisplayGUI_GridDemo with debug guides & row rects.
+
+Style
+- var-first; AppClock-only; no server.sync.
+*/
+
+(
+var closeWindows, makeGui, populate, flipCurrent, showDebug, wins, count;
+
+closeWindows = {
+    var run;
+    run = {
+        var nm;
+        wins = Window.allWindows.select({ arg w;
+            nm = w.tryPerform(\name);
+            nm.notNil and: { nm.asString.beginsWith("MagicDisplayGUI") }
+        });
+        count = wins.size;
+        wins.do(_.close);
+        ("[GUI] closed " ++ count ++ " MagicDisplayGUI windows").postln;
+        nil
+    };
+    AppClock.sched(0.00, { run.value; nil });
+};
+
+makeGui = {
+    var run;
+    run = {
+        ~gui = MagicDisplayGUI_GridDemo.new;
+        ~gui.enableMeters(false);
+        "[GUI] created (GridDemo); meters disabled".postln;
+        nil
+    };
+    AppClock.sched(0.05, { run.value; nil });
+};
+
+populate = {
+    var run;
+    run = {
+        var current, next, effC, effN, bypassA, bypassB;
+        current = [\chainA, \delay, \chorus, \testmelody];
+        next    = [\chainB, \reverb, \testmelody];
+        bypassA = [\chorus]; bypassB = [];
+        effC = current; effN = next;
+
+        ~gui.showChainsDetailed(current, next, bypassA, bypassB, effC, effN);
+        ~gui.highlightCurrentColumn(\chainA);
+        ~gui.showExpectation("Row0 two columns; rows 1–4 full-width (addSpanning); meters fixed to 30 px.", 0);
+        "[GUI] lists populated".postln;
+        nil
+    };
+    AppClock.sched(0.12, { run.value; nil });
+};
+
+showDebug = {
+    var run;
+    run = {
+        ~gui.debugGuides(true);
+        AppClock.sched(0.05, { ~gui.postLayoutReport; nil });
+        nil
+    };
+    AppClock.sched(0.20, { run.value; nil });
+};
+
+flipCurrent = {
+    var run;
+    run = {
+        var isA;
+        isA = false;
+        Routine({
+            6.do({
+                if(isA) {
+                    ~gui.highlightCurrentColumn(\chainA);
+                    ~gui.showExpectation("CURRENT: A (visual highlight only)", 0);
+                }{
+                    ~gui.highlightCurrentColumn(\chainB);
+                    ~gui.showExpectation("CURRENT: B (visual highlight only)", 0);
+                };
+                isA = isA.not;
+                3.0.wait;
+            });
+        }).play(AppClock);
+        nil
+    };
+    AppClock.sched(0.25, { run.value; nil });
+};
+
+closeWindows.value;
+makeGui.value;
+populate.value;
+// showDebug.value; // turn on/off red debug outlines
+flipCurrent.value;
+)
+// Test_MagicDisplayGUI_LayoutOnlySelfContained.scd
+// v0.4.0
+// MD 20250919-09:45 BST
+
+/*
+Purpose
+- Visual-only GUI demonstration using GridLayout (no audio, meters disabled).
+- Window ~1340x900; top row: CURRENT/NEXT columns; middle rows: expectation + countdown;
+  row below: meters (narrowed, left-anchored); bottom row: dark-grey "Processors" panel.
+- No user interaction required.
+
+Style
+- var-first in every closure; lowercase method names; AppClock-only GUI ops; no server.sync.
+*/
+
+(
+var pad, win, root, rootLayout,
+    leftPanel, leftGrid, leftHeader, leftList, leftEff,
+    rightPanel, rightGrid, rightHeader, rightList, rightEff,
+    expectationText, countdownHolder, countdownGrid, countdownLabel, countdownBar,
+    meterGroup, meterGrid, labelA, labelB, meterA, meterB, meterSpacer,
+    bottomHud, bottomGrid, bottomTitle, bottomCurLabel, bottomCurText, bottomNextLabel, bottomNextText,
+    populateDemo, cycleCurrent, wins, closedCount;
+
+AppClock.sched(0.0, {
+    // Close any existing MagicDisplayGUI* windows (deterministic)
+    var nm;
+    wins = Window.allWindows.select({ arg w;
+        nm = w.tryPerform(\name);
+        nm.notNil and: { nm.asString.beginsWith("MagicDisplayGUI") }
+    });
+    closedCount = wins.size;
+    wins.do(_.close);
+    ("[GUI] closed " ++ closedCount ++ " MagicDisplayGUI windows").postln;
+
+    // Build main window
+    pad = 10;
+    win = Window("MagicDisplayGUI – GridDemo (Visual)", Rect(120, 80, 1340, 900))
+        .front
+        .alwaysOnTop_(true);
+    root = win.view;
+
+    // Root GridLayout
+    rootLayout = GridLayout.new;
+    root.layout = rootLayout;
+
+    // === Row 0: two columns (CURRENT / NEXT) =================================
+    leftPanel = CompositeView(root).background_(Color(0.92, 0.92, 0.92));
+    leftGrid = GridLayout.new; leftPanel.layout = leftGrid;
+    leftHeader = StaticText(leftPanel).string_("CHAIN A ACTIVE").align_(\center);
+    leftList   = ListView(leftPanel).items_([]);
+    leftEff    = StaticText(leftPanel).string_("eff: —").align_(\center);
+    leftGrid.add(leftHeader, 0, 0);
+    leftGrid.add(leftList,   1, 0);
+    leftGrid.add(leftEff,    2, 0);
+    leftGrid.setRowStretch(0, 0);
+    leftGrid.setRowStretch(1, 1);
+    leftGrid.setRowStretch(2, 0);
+
+    rightPanel = CompositeView(root).background_(Color(0.92, 0.92, 0.92));
+    rightGrid = GridLayout.new; rightPanel.layout = rightGrid;
+    rightHeader = StaticText(rightPanel).string_("CHAIN B NEXT").align_(\center);
+    rightList   = ListView(rightPanel).items_([]);
+    rightEff    = StaticText(rightPanel).string_("eff: —").align_(\center);
+    rightGrid.add(rightHeader, 0, 0);
+    rightGrid.add(rightList,   1, 0);
+    rightGrid.add(rightEff,    2, 0);
+    rightGrid.setRowStretch(0, 0);
+    rightGrid.setRowStretch(1, 1);
+    rightGrid.setRowStretch(2, 0);
+
+    rootLayout.add(leftPanel,  0, 0);
+    rootLayout.add(rightPanel, 0, 1);
+    rootLayout.setColumnStretch(0, 1);
+    rootLayout.setColumnStretch(1, 1);
+    rootLayout.setRowStretch(0, 6); // top row dominates height
+
+    // === Row 1: expectation text (spans 2 columns) ===========================
+    expectationText = TextView(root)
+        .background_(Color(1, 1, 0.9))
+        .string_("Command:");
+    rootLayout.add(expectationText, 1, 0, 1, 2);
+    rootLayout.setRowStretch(1, 0);
+
+    // === Row 2: countdown (label + bar) spanning 2 columns ===================
+    countdownHolder = CompositeView(root);
+    countdownGrid   = GridLayout.new; countdownHolder.layout = countdownGrid;
+    countdownLabel  = StaticText(countdownHolder).string_("Ready");
+    countdownBar    = UserView(countdownHolder);
+    countdownGrid.add(countdownLabel, 0, 0);
+    countdownGrid.add(countdownBar,   0, 1);
+    countdownGrid.setColumnStretch(0, 0);
+    countdownGrid.setColumnStretch(1, 1);
+    rootLayout.add(countdownHolder, 2, 0, 1, 2);
+    rootLayout.setRowStretch(2, 0);
+
+    // === Row 3: meters (left) + spacer (right) to keep meters narrow =========
+    meterGroup = CompositeView(root).background_(Color(0.96, 0.96, 0.96));
+    meterGrid  = GridLayout.new; meterGroup.layout = meterGrid;
+    labelA = StaticText(meterGroup).string_("chainA");
+    meterA = LevelIndicator(meterGroup);
+    labelB = StaticText(meterGroup).string_("chainB");
+    meterB = LevelIndicator(meterGroup);
+    meterGrid.add(labelA, 0, 0);
+    meterGrid.add(meterA, 0, 1);
+    meterGrid.add(labelB, 1, 0);
+    meterGrid.add(meterB, 1, 1);
+    meterGrid.setColumnStretch(0, 0);
+    meterGrid.setColumnStretch(1, 1);
+
+    meterSpacer = CompositeView(root); // empty filler; absorbs right-space
+    rootLayout.add(meterGroup,  3, 0);
+    rootLayout.add(meterSpacer, 3, 1);
+    // columns: 0 minimal (meters), 1 stretches (spacer)
+    rootLayout.setColumnStretch(0, 0);
+    rootLayout.setColumnStretch(1, 1);
+    rootLayout.setRowStretch(3, 1);
+
+    // === Row 4: bottom Processors panel (dark grey; spans 2 columns) ========
+    bottomHud  = CompositeView(root).background_(Color(0.12, 0.12, 0.12, 0.92));
+    bottomGrid = GridLayout.new; bottomHud.layout = bottomGrid;
+    bottomTitle     = StaticText(bottomHud).string_("Processors").stringColor_(Color(0.95, 0.95, 0.95));
+    bottomCurLabel  = StaticText(bottomHud).string_("CURRENT:").stringColor_(Color(0.90, 0.90, 0.90));
+    bottomCurText   = StaticText(bottomHud).string_("–").stringColor_(Color(0.90, 0.90, 0.90));
+    bottomNextLabel = StaticText(bottomHud).string_("NEXT:").stringColor_(Color(0.80, 0.80, 0.80));
+    bottomNextText  = StaticText(bottomHud).string_("–").stringColor_(Color(0.80, 0.80, 0.80));
+
+    bottomGrid.add(bottomTitle,     0, 0, 1, 2); // span 2 columns
+    bottomGrid.add(bottomCurLabel,  1, 0);
+    bottomGrid.add(bottomCurText,   1, 1);
+    bottomGrid.add(bottomNextLabel, 2, 0);
+    bottomGrid.add(bottomNextText,  2, 1);
+    bottomGrid.setColumnStretch(0, 0);
+    bottomGrid.setColumnStretch(1, 1);
+    bottomGrid.hSpacing = 10; bottomGrid.vSpacing = 4;
+
+    rootLayout.add(bottomHud, 4, 0, 1, 2);
+    rootLayout.setRowStretch(4, 1);
+
+    // Attach resize to the VIEW (not the Window). GridLayout handles sizing.
+    root.onResize = { nil };
+
+    // ---- Populate demo content ------------------------------------------------
+    populateDemo = {
+        var current, next, effC, effN, bypassA, bypassB, formatList, effCText, effNText;
+        current = [\chainA, \delay, \chorus, \testmelody];
+        next    = [\chainB, \reverb, \testmelody];
+        bypassA = [\chorus]; bypassB = [];
+        effC = current; effN = next;
+
+        formatList = { arg listRef, bypassKeys, effList;
+            var out, lastIdx, procs, idx;
+            out = Array.new;
+            lastIdx = listRef.size - 1;
+            out = out.add("src : " ++ listRef[lastIdx]);
+            if(listRef.size > 2) {
+                out = out.add("procs:");
+                procs = listRef.copyRange(1, lastIdx - 1).reverse;
+                idx = 1;
+                procs.do({ arg key;
+                    var byp, badge, line;
+                    byp = bypassKeys.includes(key);
+                    badge = byp.if({ "[BYP]" }, { "[ON]" });
+                    line = " [" ++ idx ++ "] " ++ key ++ " " ++ badge;
+                    out = out.add(line);
+                    idx = idx + 1;
+                });
+            }{
+                out = out.add("procs: (none)");
+            };
+            out = out.add("sink : " ++ listRef[0]);
+            out
+        };
+
+        leftList.items_(formatList.value(current, bypassA, effC));
+        rightList.items_(formatList.value(next,    bypassB, effN));
+
+        effCText = "eff: " ++ effC.join(" -> ");
+        effNText = "eff: " ++ effN.join(" -> ");
+        leftEff.string_(effCText);
+        rightEff.string_(effNText);
+
+        // headers + highlight
+        leftHeader.string_("CHAIN A ACTIVE");
+        rightHeader.string_("CHAIN B NEXT");
+        leftPanel.background_(Color(0.85, 1.0, 0.85));
+        rightPanel.background_(Color(0.92, 0.92, 0.92));
+
+        // bottom HUD strings
+        bottomCurText.string_((" " ++ effC.copyRange(1, effC.size - 1).join(" -> ")).trim);
+        bottomNextText.string_((" " ++ effN.copyRange(1, effN.size - 1).join(" -> ")).trim);
+
+        expectationText.string_("Visual-only: GridLayout; bottom Processors panel; meters narrowed (left).");
+        countdownLabel.string_("Ready");
+        nil
+    };
+    populateDemo.value;
+
+    // ---- Flip CURRENT highlight every ~3s (visual only) ----------------------
+    cycleCurrent = {
+        var isA;
+        isA = false;
+        Routine({
+            8.do({
+                if(isA) {
+                    leftPanel.background_(Color(0.85, 1.0, 0.85));
+                    rightPanel.background_(Color(0.92, 0.92, 0.92));
+                    leftHeader.string_("CHAIN A ACTIVE");
+                    rightHeader.string_("CHAIN B NEXT");
+                    expectationText.string_("CURRENT: A (visual highlight only)");
+                }{
+                    leftPanel.background_(Color(0.92, 0.92, 0.92));
+                    rightPanel.background_(Color(0.85, 1.0, 0.85));
+                    leftHeader.string_("CHAIN A NEXT");
+                    rightHeader.string_("CHAIN B ACTIVE");
+                    expectationText.string_("CURRENT: B (visual highlight only)");
+                };
+                isA = isA.not;
+                3.0.wait;
+            });
+        }).play(AppClock);
+        nil
+    };
+    cycleCurrent.value;
+
+    nil
+});
 )
 /* Test_MagicDisplayGUI_Scenarios.scd v0.5
    Very explicit scenarios: log each step, update "Command:", then force GUI redraw.
