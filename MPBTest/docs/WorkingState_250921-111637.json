@@ -1,0 +1,2 @@
+('timestamp': "250921-111637", 'environment': ('sampleRate': 48000.0, 'blockSize': 64, 'outDevice': "default"), 'versions': ('MPBTest_BringUp': "v0.1.9", 'MagicDisplayGUI': "v0.1.3", 'MPBTest_Assertions': "unknown", 'MagicDisplayGUI_GridDemo': "v0.1.3", 
+  'MagicPedalboardNew': "v0.4.7", 'MPBTest_AcceptanceSuites': "unknown", 'MPBTest_Scenario': "v0.2.2", 'MagicDisplay': "v0.1.3"), 'classFiles': [])

@@ -1,5 +1,5 @@
 // MPBTest_Record_WorkingState.scd
-// v0.1.0
+// v0.1.1
 // MD 20250920-1930
 
 (
@@ -9,7 +9,7 @@ var v_mpbtest_bring, v_mpbtest_scen, v_mpbtest_suites, v_mpbtest_assert;
 var v_mpb, v_md, v_mdgui, v_mdgrid;
 var fileList, classPaths;
 
-// 0) Paths & timestamp
+/*// 0) Paths & timestamp
 now   = Date.getDate.stamp; // "2025-09-20_19:30:15"
 stamp = now.replace(":", "").replace("_", "-").keep(15); // e.g. 2025-09-20-1930
 docDir = PathName(thisProcess.nowExecutingPath ?? thisProcess.cwd).pathOnly
@@ -17,12 +17,28 @@ docDir = PathName(thisProcess.nowExecutingPath ?? thisProcess.cwd).pathOnly
     .split($/)
     .drop(-2) // climb out of Scripts/
     .addAll(["MPBTest","docs"])
+    .join($/).standardizePath;*/
+
+// 0) Paths & timestamp
+now   = Date.getDate.stamp; // "2025-09-20_19:30:15"
+stamp = now.replace(":", "").replace("_", "-").keep(15); // e.g. 2025-09-20-1930
+
+// Use script location if available, else current working directory
+docDir = PathName(thisProcess.nowExecutingPath ? File.getcwd).pathOnly
+    .standardizePath
+    .split($/)
+    .drop(-2) // climb out of Scripts/
+    .addAll(["MPBTest","docs"])
     .join($/).standardizePath;
+
 
 mkDir = { |p|
     var pn = PathName(p);
-    if(pn.exists.not) { pn.mkdir }
+    if(pn.isFolder.not) {
+        File.mkdir(p);
+    };
 };
+
 
 // 1) Ensure docs dir
 mkDir.(docDir);
@@ -33,7 +49,10 @@ o  = s.options;
 outDev = o.outDevice ? "default";
 sr  = s.sampleRate ? 0;
 blk = o.blockSize;
-scv = Main.scVersionString ? Main.scVersion;
+/*scv = Main.scVersionString ? Main.scVersion;*/
+/*scv = Platform.version.asString;*/
+scv = thisProcess.interpreter.version;
+
 
 // 3) Versions
 v_mpbtest_bring  = (MPBTest_BringUp.respondsTo(\version)).if({ MPBTest_BringUp.version },{ "unknown" });
