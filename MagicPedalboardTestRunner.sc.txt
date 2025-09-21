@@ -16,7 +16,7 @@ Style:
 */
 
 MagicPedalboardTestRunner : Object {
-    var <logger, <pedalboard, <>gui;
+    var <logger, <pedalboard, <gui;
 
     *new { arg mpb, gui;
         ^super.new.init(mpb, gui);
