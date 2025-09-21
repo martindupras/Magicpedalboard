@@ -1,0 +1,1093 @@
+// adapter_commandtree_to_magicpedalboard.scd
+// v0.3.1
+// MD 20250916-14:49
+
+(
+
+var alreadyWrapped;
+
+~ct_knownVerbs = #[\add, \bypass, \removeAt, \swap, \clear, \setSource, \switch];
+~ct_knownProcs = #[\delay, \chorus, \tremolo, \reverb, \drive, \transpose, \hex, \audio, \filters, \delays, \noise, \oscillators];
+~ct_log = { arg messageString; ("[CT->MPB] " ++ messageString).postln };
+
+~ct_normalizeTokens = { arg oscPathString;
+    var rawTokens, tokens;
+    rawTokens = oscPathString.asString.split($/).reject({ arg one; one.isEmpty });
+    tokens = if(rawTokens.size > 0 and: { rawTokens[0].asSymbol == \commands }) {
+        rawTokens.copyRange(1, rawTokens.size - 1)
+    }{
+        rawTokens
+    };
+    tokens.collect({ arg one; one.asSymbol })
+};
+
+~ct_applyOneVerb = { arg tokens, pedalboard, gui;
+    var consumed, verb, params, indexCount;
+    consumed = 0;
+    if(tokens.isEmpty) { ^0 };
+    verb = tokens[0];
+    params = tokens.copyRange(1, tokens.size - 1);
+
+    switch(verb,
+
+/*        \add, {
+            if(params.size >= 1) { pedalboard.add(params[0]); ~ct_log.("add " ++ params[0]); consumed = 2; }
+            { ~ct_log.("add: missing processor"); consumed = 1; };
+        },*/
+\add, {
+    if(params.size >= 1) {
+        var procSym;
+        procSym = params[0].asSymbol;
+        ~ct_ensureProcessor.(procSym);        // <-- ensure Ndef exists and is stereo
+        pedalboard.add(procSym);
+        ~ct_log.("add " ++ procSym);
+        consumed = 2;
+    }{
+        ~ct_log.("add: missing processor"); consumed = 1;
+    };
+},
+
+		\bypass, {
+            if(params.size >= 2) {
+                var procSym, stateBool;
+                procSym = params[0];
+                stateBool = (params[1] == \on);
+                pedalboard.bypass(procSym, stateBool);
+                ~ct_log.("bypass " ++ procSym ++ " -> " ++ stateBool);
+                consumed = 3;
+            }{ ~ct_log.("bypass: need proc and on/off"); consumed = 1; };
+        },
+        \removeAt, {
+            if(params.size >= 1) {
+                var indexInteger;
+                indexInteger = params[0].asString.asInteger;
+                pedalboard.removeAt(indexInteger);
+                ~ct_log.("removeAt " ++ indexInteger);
+                consumed = 2;
+            }{ ~ct_log.("removeAt: need index"); consumed = 1; };
+        },
+        \swap, {
+            if(params.size >= 2) {
+                var aIndex, bIndex;
+                aIndex = params[0].asString.asInteger;
+                bIndex = params[1].asString.asInteger;
+                pedalboard.swap(aIndex, bIndex);
+                ~ct_log.("swap " ++ aIndex ++ " <-> " ++ bIndex);
+                consumed = 3;
+            }{ ~ct_log.("swap: need two indices"); consumed = 1; };
+        },
+        \clear, { pedalboard.clearChain; ~ct_log.("clear NEXT"); consumed = 1; },
+        \setSource, {
+            if(params.size >= 1) { pedalboard.setSource(params[0]); ~ct_log.("setSource " ++ params[0]); consumed = 2; }
+            { ~ct_log.("setSource: missing symbol"); consumed = 1; };
+        },
+        \switch, { pedalboard.switchChain(0.12); ~ct_log.("switch crossfade"); consumed = 1; },
+        {
+            if(~ct_knownProcs.includes(verb)) {
+                pedalboard.add(verb); ~ct_log.("add (fallback) " ++ verb); consumed = 1;
+            }{ ~ct_log.("unknown verb: " ++ verb); consumed = 1; };
+        }
+    );
+    consumed
+};
+
+~ct_applyOSCPathToMPB = { arg oscPathString, pedalboard, gui;
+    var tokens, tokenIndex, consumedNow, appliedCount, tailTokens;
+    tokens = ~ct_normalizeTokens.(oscPathString);
+    if(tokens.isEmpty) { ~ct_log.("empty OSC path"); ^false };
+    ~ct_log.("path=" ++ oscPathString ++ "  tokens=" ++ tokens);
+    tokenIndex = 0; appliedCount = 0;
+    while({ tokenIndex < tokens.size }, {
+        tailTokens = tokens.copyRange(tokenIndex, tokens.size - 1);
+        consumedNow = ~ct_applyOneVerb.(tailTokens, pedalboard, gui);
+        if(consumedNow <= 0) { consumedNow = 1 };
+        tokenIndex = tokenIndex + consumedNow;
+        appliedCount = appliedCount + 1;
+    });
+    appliedCount > 0
+};
+
+~ct_applyQueueToMPBFromCM = { arg commandManager, pedalboard, gui;
+    var oscPathString, listSnapshot;
+    listSnapshot = commandManager.midiManager.queue.commandList;
+    ~ct_log.("queue snapshot: " ++ listSnapshot);
+    oscPathString = commandManager.midiManager.queue.exportAsOSCPath;
+    ~ct_log.("exported path: " ++ oscPathString);
+    ~ct_applyOSCPathToMPB.(oscPathString, pedalboard, gui);
+    commandManager.midiManager.queue.clear;
+    true
+};
+
+~ct_sendAndApply = { arg commandManager, pedalboard, gui;
+    ~ct_applyQueueToMPBFromCM.(commandManager, pedalboard, gui);
+};
+
+
+
+// 0) Capture the original adapter exactly once so we can delegate non-switch paths safely.
+alreadyWrapped = (~ct_applyOSCPathToMPB_raw.notNil);
+if(alreadyWrapped.not) {
+    ~ct_applyOSCPathToMPB_raw = ~ct_applyOSCPathToMPB;
+};
+
+// 1) Helper: guard NEXT tail before switch, then audit after fade and recover if needed.
+
+~ct_switchWithRecovery = { arg mpb, gui, fade = 0.12;
+    var ensureNextAudible, auditAndFix, fadeLocal, myGen;
+
+    // initialize state vars once
+    if(~ct_switchBusy.isNil) { ~ct_switchBusy = false };
+    if(~ct_switchGen.isNil)  { ~ct_switchGen  = 0     };
+
+    // prevent overlapping switches (re-entrant safe)
+    if(~ct_switchBusy == true) {
+        "[CT->MPB] switch ignored (busy)".postln;
+        ^nil;
+    };
+
+    ~ct_switchBusy = true;
+    ~ct_switchGen  = ~ct_switchGen + 1;
+    myGen          = ~ct_switchGen;
+
+    ensureNextAudible = {
+        var effNext, last;
+        effNext = mpb.effectiveNext;
+        last    = effNext[effNext.size - 1];
+        if(last == \ts0) {
+            "[CT->MPB] guard: NEXT tail \\ts0 -> /setSource/testmelody".postln;
+            // Use the original adapter to avoid wrapping recursion
+            ~ct_applyOSCPathToMPB_raw.("/setSource/testmelody", mpb, gui);
+        };
+    };
+
+    auditAndFix = {
+        var a, b;
+        // ignore stale audits from older generations
+        if(~ct_switchGen != myGen) { ^nil };
+
+        a = Ndef(\chainA).isPlaying;
+        b = Ndef(\chainB).isPlaying;
+
+        if((a or: { b }).not) {
+            "[CT->MPB] post-switch audit: both stopped -> recovering CURRENT & OptionA".postln;
+            mpb.playCurrent;
+            mpb.enforceExclusiveCurrentOptionA(0.1);
+        };
+        ("[PLAY] A=% B=%".format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
+
+        // release busy flag only after our generation’s audit runs
+        ~ct_switchBusy = false;
+    };
+
+    fadeLocal = fade ? 0.12;
+
+    ensureNextAudible.value;
+    mpb.switchChain(fadeLocal);
+
+    // schedule audit a bit after the fade completes; protect with generation check
+    AppClock.sched(fadeLocal + 0.20, { auditAndFix.value; nil });
+};
+
+
+/*~ct_switchWithRecovery = { arg mpb, gui, fade = 0.12;
+    var ensureNextAudible, auditAndFix, fadeLocal;
+
+    // Ensure NEXT ends with an audible source before switching.
+    ensureNextAudible = {
+        var effNext, last;
+        effNext = mpb.effectiveNext;
+        last = effNext[effNext.size - 1];
+        if(last == \ts0) {
+            "[CT->MPB] guard: NEXT tail \\ts0 -> /setSource/testmelody".postln;
+            ~ct_applyOSCPathToMPB_raw.("/setSource/testmelody", mpb, gui);
+        };
+    };
+
+    // After the crossfade, check A/B; if both false, make CURRENT audible and re-enforce Option A.
+    auditAndFix = {
+        var a, b;
+        a = Ndef(\chainA).isPlaying;
+        b = Ndef(\chainB).isPlaying;
+        if((a or: { b }).not) {
+            "[CT->MPB] post-switch audit: both stopped -> recovering CURRENT & OptionA".postln;
+            mpb.playCurrent;
+            mpb.enforceExclusiveCurrentOptionA(0.1);
+        };
+        ("[PLAY] A=% B=%".format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
+    };
+
+    fadeLocal = fade ? 0.12;
+    ensureNextAudible.value;
+    mpb.switchChain(fadeLocal);
+    AppClock.sched(fadeLocal + 0.20, { auditAndFix.value; nil });
+};*/
+
+// 2) Wrapper adapter: intercept ONLY "/switch"; delegate all other paths to the original.
+~ct_applyOSCPathToMPB = { arg path, mpb, gui;
+    var p, f;
+    p = path.asString;
+    if(p == "/switch") {
+        f = 0.12; // keep your usual fade; adjust if you use a different default
+        ~ct_switchWithRecovery.(mpb, gui, f);
+    }{
+        ~ct_applyOSCPathToMPB_raw.(p, mpb, gui);
+    };
+};
+
+
+~ct_ensureProcessor = { arg keySym;
+    var k;
+    k = keySym.asSymbol;
+
+    Server.default.bind({
+        var defineDelay, defineBypass, defineIdentity;
+
+        defineIdentity = {
+            var make;
+            make = {
+                // pass-through “processor” that keeps stereo and \in.ar(2)
+                // used as a safe fallback for unknown keys
+                Ndef(k, { var sig; sig = \in.ar(2); sig });
+                Ndef(k).ar(2);
+            };
+            if(Ndef(k).source.isNil) { make.value } { Ndef(k).ar(2) };
+        };
+
+        defineDelay = {
+            var make;
+            make = {
+                // simple stereo delay: read from \in.ar(2) → short delay → mix
+                Ndef(\delay, {
+                    var sig, del, time, fb, mix;
+                    sig  = \in.ar(2);
+                    time = 0.25;   // s
+                    fb   = 0.25;
+                    mix  = 0.5;
+                    del  = DelayC.ar(sig + (LocalIn.ar(2) * fb), 1.0, time);
+                    LocalOut.ar(del);
+                    XFade2.ar(sig, del, (mix * 2 - 1).clip(-1, 1))
+                });
+                Ndef(\delay).ar(2);
+            };
+            if(Ndef(\delay).source.isNil) { make.value } { Ndef(\delay).ar(2) };
+        };
+
+        defineBypass = {
+            // A named pass-through “processor” you might use in test chains
+            var make;
+            make = {
+                Ndef(\bypass, { \in.ar(2) });
+                Ndef(\bypass).ar(2);
+            };
+            if(Ndef(\bypass).source.isNil) { make.value } { Ndef(\bypass).ar(2) };
+        };
+
+        // choose per key
+        if(k == \delay) { defineDelay.value }
+        { if(k == \bypass) { defineBypass.value } { defineIdentity.value } };
+    });
+};
+
+
+)
+// Adapter_UIHook_Install.scd
+// v0.2.0
+// MD 20250918-20:10 BST
+
+/* Purpose
+   - Wrap ~ct_applyOSCPathToMPB to call ~procHud_update after each token apply.
+   - No behavior change to your adapter's logic.
+
+   Style
+   - var-first; lowercase; AppClock for UI calls; no server.sync.
+*/
+
+(
+var wrap;
+
+if(~ct_applyOSCPathToMPB.isNil) {
+    "[UIHOOK] ~ct_applyOSCPathToMPB is nil; load the adapter file first.".warn;
+    ^nil
+};
+
+if(~ct_applyOSCPathToMPB_orig.isNil) {
+    ~ct_applyOSCPathToMPB_orig = ~ct_applyOSCPathToMPB;
+};
+
+wrap = { arg pathString, mpb, gui;
+    var result;
+    result = ~ct_applyOSCPathToMPB_orig.(pathString, mpb, gui);
+    if(~procHud_update.notNil) {
+        AppClock.sched(0.0, { ~procHud_update.(); nil });
+    };
+    result
+};
+
+~ct_applyOSCPathToMPB = wrap;
+"[UIHOOK] adapter UI hook installed".postln;
+)
+// bootstrap_audio_and_fx_min.scd
+// v0.1
+
+(
+Server.default.boot;
+Server.default.bind({
+    // Musical test source (stereo) – guaranteed audibility
+    Ndef(\testmelody, {
+        var trig = Impulse.kr(3.2);
+        var seq  = Dseq([220, 277.18, 329.63, 392, 329.63, 277.18, 246.94], inf);
+        var f    = Demand.kr(trig, 0, seq);
+        var env  = Decay2.kr(trig, 0.01, 0.35);
+        var tone = SinOsc.ar(f) * env * 0.25;
+        var pan  = ToggleFF.kr(trig).linlin(0, 1, -0.6, 0.6);
+        Pan2.ar(tone, pan)
+    });
+    Ndef(\testmelody).ar(2);
+
+    // Minimal \delay (stereo) – matches your style using \in.ar
+    Ndef(\delay, { |in, time=0.45, fb=0.35, mix=0.5|
+        var sig    = \in.ar(2);
+        var delayed= CombC.ar(sig, 2.0, time.clip(0.01, 2.0),
+                              time * (fb.clip(0.0, 0.95) * 6 + 0.1));
+        XFade2.ar(sig, delayed, mix.clip(0,1) * 2 - 1)
+    });
+    Ndef(\delay).ar(2);
+});
+)
+// demo_apply_after_fix.scd
+// v0.1
+// MD 20250916-1031
+
+(
+var log;
+
+log = { arg m; ("[DEMO] " ++ m).postln };
+
+// Adapter must be present
+if(~ct_sendAndApply.isNil) {
+    "[DEMO] Please evaluate adapter_commandtree_to_magicpedalboard.scd first.".warn;
+};
+
+// Reload CommandManager (imports your JSON with payloads/verbs)
+~cm = CommandManager.new;
+log.("CommandManager reloaded.");
+
+// Sequence: add delay -> switch -> bypass on -> bypass off -> switch
+~cm.midiManager.queue.clear;
+~cm.midiManager.queue.enqueueCommand(\add);
+~cm.midiManager.queue.enqueueCommand(\delay);
+~ct_sendAndApply.(~cm, ~pedalboard, ~gui);
+
+~cm.midiManager.queue.enqueueCommand(\switch);
+~ct_sendAndApply.(~cm, ~pedalboard, ~gui);
+
+~cm.midiManager.queue.enqueueCommand(\bypass);
+~cm.midiManager.queue.enqueueCommand(\delay);
+~cm.midiManager.queue.enqueueCommand(\on);
+~ct_sendAndApply.(~cm, ~pedalboard, ~gui);
+
+~cm.midiManager.queue.enqueueCommand(\bypass);
+~cm.midiManager.queue.enqueueCommand(\delay);
+~cm.midiManager.queue.enqueueCommand(\off);
+~ct_sendAndApply.(~cm, ~pedalboard, ~gui);
+
+~cm.midiManager.queue.enqueueCommand(\switch);
+~ct_sendAndApply.(~cm, ~pedalboard, ~gui);
+
+~pedalboard.printChains;
+)
+// demo_commandtree_apply_hotfix.scd
+// v0.1
+// MD 20250916-1020
+
+(
+var log;
+
+log = { arg m; ("[DEMO] " ++ m).postln };
+
+// Ensure adapter is loaded; if not, evaluate adapter_commandtree_to_magicpedalboard.scd
+if(~ct_sendAndApply.isNil) {
+    "[DEMO] Please evaluate adapter_commandtree_to_magicpedalboard.scd first.".warn;
+};
+
+// Reload CommandManager (imports your updated JSON with payloads)
+~cm = CommandManager.new;
+log.("CommandManager reloaded.");
+
+// 1) add delay on NEXT
+~cm.midiManager.queue.clear;
+~cm.midiManager.queue.enqueueCommand(\add);
+~cm.midiManager.queue.enqueueCommand(\delay);
+~ct_sendAndApply.(~cm, ~pedalboard, ~gui);
+
+// 2) switch to hear delay on CURRENT
+~cm.midiManager.queue.enqueueCommand(\switch);
+~ct_sendAndApply.(~cm, ~pedalboard, ~gui);
+
+// 3) bypass delay ON → OFF → final switch
+~cm.midiManager.queue.enqueueCommand(\bypass);
+~cm.midiManager.queue.enqueueCommand(\delay);
+~cm.midiManager.queue.enqueueCommand(\on);
+~ct_sendAndApply.(~cm, ~pedalboard, ~gui);
+
+~cm.midiManager.queue.enqueueCommand(\bypass);
+~cm.midiManager.queue.enqueueCommand(\delay);
+~cm.midiManager.queue.enqueueCommand(\off);
+~ct_sendAndApply.(~cm, ~pedalboard, ~gui);
+
+~cm.midiManager.queue.enqueueCommand(\switch);
+~ct_sendAndApply.(~cm, ~pedalboard, ~gui);
+
+~pedalboard.printChains;
+)
+// demo_commandtree_apply_now.scd
+// v0.2
+// MD 20250916-1003
+
+(
+var ensureAudio, ensureGui, ensurePedalboard, ensureAdapter, log;
+
+// simple logger
+log = { arg messageString; ("[DEMO] " ++ messageString).postln };
+
+// A) Audio: boot + musical internal source (stereo)
+ensureAudio = {
+    Server.default.boot;
+    Server.default.bind({
+        Ndef(\testmelody, {
+            var trig, seq, f, env, tone, panPos;
+            trig = Impulse.kr(3.2);
+            seq  = Dseq([220, 277.18, 329.63, 392, 329.63, 277.18, 246.94], inf);
+            f    = Demand.kr(trig, 0, seq);
+            env  = Decay2.kr(trig, 0.01, 0.35);
+            tone = SinOsc.ar(f) * env * 0.25;
+            panPos = ToggleFF.kr(trig).linlin(0, 1, -0.6, 0.6);
+            Pan2.ar(tone, panPos)
+        });
+        Ndef(\testmelody).ar(2);
+
+        // lightweight FX (safe to re-run)
+        Ndef(\delay, { |in, time=0.45, fb=0.35, mix=0.5|
+            var sig = \in.ar(2);
+            var delayed = CombC.ar(sig, 2.0, time.clip(0.01, 2.0), time * (fb.clip(0,0.95) * 6 + 0.1));
+            XFade2.ar(sig, delayed, (mix.clip(0,1) * 2 - 1))
+        });
+        Ndef(\chorus, { |in, rate=0.8, depth=0.008, base=0.020|
+            var sig = \in.ar(2);
+            var mod = base.clip(0.0, 0.05) + (SinOsc.kr(rate.clip(0.1,5), 0, depth.clip(0.0,0.02)));
+            DelayC.ar(sig, 0.1, mod)
+        });
+    });
+};
+
+// B) GUI: your runner guarantees one window + PROBE FRAME
+ensureGui = {
+    ~md_bootProbeScenario.();
+};
+
+// C) Pedalboard + GUI binding (reuse if present)
+ensurePedalboard = {
+    if(~gui.isNil) { ~gui = MagicDisplayGUI.new() };
+    if(~pedalboard.isNil) { ~pedalboard = MagicPedalboardNew.new(~gui) };
+    ~pedalboard.setSource(\testmelody);
+    ~pedalboard.switchChain(0.12);
+};
+
+// D) Adapter presence
+ensureAdapter = {
+    if(~ct_sendAndApply.isNil) {
+        "[DEMO] Please evaluate adapter_commandtree_to_magicpedalboard.scd first.".warn;
+    };
+};
+
+// ---- run prep ----
+ensureAudio.value;
+ensureGui.value;
+ensurePedalboard.value;
+ensureAdapter.value;
+
+// E) Reload CommandManager (imports updated myTree.json automatically)
+~cm = CommandManager.new;
+log.("CommandManager reloaded.");
+
+// F) Drive actions via queue + SEND + adapter
+
+// 1) add delay
+~cm.midiManager.queue.clear;
+~cm.midiManager.queue.enqueueCommand(\add);
+~cm.midiManager.queue.enqueueCommand(\delay);
+~ct_sendAndApply.(~cm, ~pedalboard, ~gui);
+
+// 2) switch (make it CURRENT, audible)
+~cm.midiManager.queue.enqueueCommand(\switch);
+~ct_sendAndApply.(~cm, ~pedalboard, ~gui);
+
+// 3) bypass delay ON, then OFF, then switch back
+~cm.midiManager.queue.enqueueCommand(\bypass);
+~cm.midiManager.queue.enqueueCommand(\delay);
+~cm.midiManager.queue.enqueueCommand(\on);
+~ct_sendAndApply.(~cm, ~pedalboard, ~gui);
+
+~cm.midiManager.queue.enqueueCommand(\bypass);
+~cm.midiManager.queue.enqueueCommand(\delay);
+~cm.midiManager.queue.enqueueCommand(\off);
+~ct_sendAndApply.(~cm, ~pedalboard, ~gui);
+
+// Inspect (also drives GUI detailed view)
+~pedalboard.printChains;
+)
+// demo_commandtree_milestone.scd
+// v0.1
+// MD 20250916-0852
+
+(
+// ---- A) Audio source + basic FX (no server.sync, safe to re-run) ----
+Server.default.boot;  // boot if not already
+
+// Ensure an internal musical test source (stereo) as \testmelody
+Server.default.bind({
+    Ndef(\testmelody, {
+        var trig = Impulse.kr(3.2);
+        var seq = Dseq([220, 277.18, 329.63, 392, 329.63, 277.18, 246.94], inf);
+        var f  = Demand.kr(trig, 0, seq);
+        var env = Decay2.kr(trig, 0.01, 0.35);
+        var tone = SinOsc.ar(f) * env * 0.25;
+        Pan2.ar(tone, ToggleFF.kr(trig).linlin(0, 1, -0.6, 0.6))
+    });
+    Ndef(\testmelody).ar(2);
+});
+
+// Optional: simple FX defaults (if not already defined elsewhere)
+Server.default.bind({
+    Ndef(\delay, { |in, time=0.45, fb=0.35, mix=0.5|
+        var sig = \in.ar(2);
+        var delayed = CombC.ar(sig, 2.0, time.clip(0.01, 2.0), time * (fb.clip(0,0.95) * 6 + 0.1));
+        XFade2.ar(sig, delayed, mix.clip(0,1) * 2 - 1)
+    });
+    Ndef(\chorus, { |in, rate=0.8, depth=0.008, base=0.020|
+        var sig = \in.ar(2);
+        var mod = base.clip(0.0, 0.05) + (SinOsc.kr(rate.clip(0.1,5), 0, depth.clip(0.0,0.02)));
+        DelayC.ar(sig, 0.1, mod)
+    });
+});
+
+// ---- B) Bring up your single GUI window (runner you already have) ----
+~md_bootProbeScenario.();   // ensures one MagicDisplayGUI window + PROBE FRAME
+// ---- C) Ensure pedalboard & bind GUI as display if not already done ----
+~gui = ~gui ?? { MagicDisplayGUI.new() };         // class builds window on AppClock internally
+~pedalboard = ~pedalboard ?? { MagicPedalboardNew.new(~gui) };
+~pedalboard.setSource(\testmelody);               // audible source
+~pedalboard.switchChain(0.12);                    // fade in CURRENT
+
+// ---- D) CommandManager (imports ~/CommandTreeSavefiles/myTree.json) ----
+~cm = ~cm ?? { CommandManager.new };              // uses your importer path
+// If you edited myTree.xml, convert to JSON now (uncomment):
+// ~ct_convertXmlToJson.("~/myTree.xml", "~/CommandTreeSavefiles/myTree.json");
+// ~cm = CommandManager.new;  // reinit to re-import
+// ---- E) Demo sequence using your queue + SEND and the adapter ----
+// 1) Add delay to NEXT (your current XML tokens may just be "delay"; adapter maps it to add/delay)
+~cm.midiManager.queue.clear;
+~cm.midiManager.queue.enqueueCommand(\delay);
+~ct_sendAndApply.(~cm, ~pedalboard, ~gui);
+
+// 2) Switch to hear it (CURRENT <- NEXT)
+~cm.midiManager.queue.enqueueCommand(\switch);
+~ct_sendAndApply.(~cm, ~pedalboard, ~gui);
+
+// 3) Bypass delay ON (then OFF), then switch again
+~cm.midiManager.queue.enqueueCommand(\bypass);
+~cm.midiManager.queue.enqueueCommand(\delay);
+~cm.midiManager.queue.enqueueCommand(\on);
+~ct_sendAndApply.(~cm, ~pedalboard, ~gui);
+
+// Optional: turn bypass OFF and switch back
+~cm.midiManager.queue.enqueueCommand(\bypass);
+~cm.midiManager.queue.enqueueCommand(\delay);
+~cm.midiManager.queue.enqueueCommand(\off);
+~ct_sendAndApply.(~cm, ~pedalboard, ~gui);
+
+~pedalboard.printChains;   // posts and drives GUI detail view
+)
+// demo_commandtree_preformed_queues.scd
+// v0.2
+// MD 20250916-1048
+
+(
+var log, makeCMIfNeeded, enqueueTokensFromPath, playlist, indexCounter, totalCount;
+
+log = { arg msg; ("[DEMO] " ++ msg).postln };
+
+makeCMIfNeeded = {
+    if(~cm.isNil) { ~cm = CommandManager.new; log.("CommandManager created and JSON imported."); };
+};
+
+enqueueTokensFromPath = { arg cm, pathString;
+    var tokens, tokenCounter, tokenTotal, one;
+    // convert "/verb/arg1/arg2" into a token list on the cm queue
+    tokens = pathString.asString.split($/).reject({ arg oneToken; oneToken.isEmpty }).collect({ arg s; s.asSymbol });
+    cm.midiManager.queue.clear;
+    tokenCounter = 0; tokenTotal = tokens.size;
+    while({ tokenCounter < tokenTotal }, {
+        one = tokens[tokenCounter];
+        cm.midiManager.queue.enqueueCommand(one);
+        tokenCounter = tokenCounter + 1;
+    });
+    log.("enqueued: " ++ tokens);
+};
+
+// A small playlist of fully-formed queues, like the tree would send
+// (You can add "/commands/..." variants too; adapter strips the prefix.)
+
+playlist = [
+    "/setSource/testmelody",  // <— Ensure NEXT isn't Silent
+    "/add/delay",
+    "/switch",
+    "/bypass/delay/on",
+    "/bypass/delay/off",
+    "/switch"
+];
+
+/*playlist = [
+    "/add/delay",
+    "/switch",
+    "/bypass/delay/on",
+    "/bypass/delay/off",
+    "/switch"
+];*/
+
+indexCounter = 0; totalCount = playlist.size;
+
+~demo_next = {
+    var path;
+    makeCMIfNeeded.value;
+    if(indexCounter >= totalCount) {
+        log.("playlist complete.");
+    }{
+        path = playlist[indexCounter];
+        enqueueTokensFromPath.(~cm, path);
+        ~ct_sendAndApply.(~cm, ~pedalboard, ~gui);
+        log.("applied: " ++ path);
+        indexCounter = indexCounter + 1;
+        ~pedalboard.printChains;
+    };
+};
+
+~demo_restart = {
+    indexCounter = 0;
+    log.("playlist reset.");
+};
+)
+// Demo_Install_MinProcessors.scd
+// v0.1.0
+// MD 2025-09-18 11:58 BST
+
+/* Purpose
+   - Install a minimal, safe stereo \delay processor so chains like
+     [chainX, delay, testmelody] are AUDIBLE.
+   - Generated audio only; processors read from \in.ar(2); no SoundIn.
+   - Idempotent; safe to re-run.
+
+   Style
+   - var-first in every function/closure; lowercase method names.
+   - No server.sync; wrap server ops in Server.default.bind.
+   - JITLib connections elsewhere MUST use Ndef(left) <<> Ndef(right).
+*/
+
+(
+var installDelay;
+installDelay = {
+    Server.default.bind({
+        // Simple feedback delay. Reads from \in.ar(2) per project policy.
+        Ndef(\delay, {
+            var inSig, maxDelay, time, fb, mix, wet;
+            inSig    = \in.ar(2);              // <- policy: processors read from \in.ar(defaultNumChannels)
+            maxDelay = 1.0;
+            time     = (\time.kr(0.25)).clip(0.0, maxDelay);
+            fb       = (\fb.kr(0.25)).clip(0.0, 0.95);
+            mix      = (\mix.kr(0.35)).clip(0.0, 1.0);
+            wet      = DelayC.ar(inSig + (LocalIn.ar(2) * fb), maxDelay, time);
+            LocalOut.ar(wet);
+            XFade2.ar(inSig, wet, (mix * 2) - 1) * 0.9
+        });
+        // Pin stereo/audio-rate bus shape (authoritative shape)
+        Ndef(\delay).mold(2, \audio);
+    });
+    "[MINPROC] Installed \\delay (stereo)".postln;
+};
+installDelay.();
+)
+// Diag_BusChannel_Map.scd
+// v0.1
+// MD 20250917-1154
+//
+// Purpose: Post bus rate + channel count for every Ndef in CURRENT and NEXT
+//          effective lists; helps catch mono nodes causing "2→1 wrap".
+// Style: tilde vars, var-first, lowercase names, no server.sync,
+//        server ops inside Server.default.bind.
+
+(
+var log, reportList;
+
+log = { arg s; ("[BUS]" ++ " " ++ s).postln };
+
+reportList = { arg label, listSyms;
+    var rows;
+    rows = listSyms.collect({ arg k;
+        var b = Ndef(k).bus;
+        var rate = (b.notNil).if({ b.rate }, { \unknown });
+        var ch   = (b.notNil).if({ b.numChannels }, { -1 });
+        var play = Ndef(k).isPlaying;
+        [k, rate, ch, play]
+    });
+    (label ++ " = " ++ rows.asString).postln;
+};
+
+~mpb.printChains;  // also drives your GUI detail view
+reportList.("CURRENT", ~mpb.effectiveCurrent);
+reportList.("NEXT   ", ~mpb.effectiveNext);
+)
+// editor_commandtree_add_demo_verbs.scd
+// v0.3
+// MD 20250916-0957
+
+(
+var jsonPath, saveFolder, savePrefix;
+var ensureChildUnder, ensurePath, rootNode, commandsNode;
+
+// paths
+jsonPath   = "/Users/martindupras/CommandTreeSavefiles/myTree.json".standardizePath;
+saveFolder = "/Users/martindupras/CommandTreeSavefiles";
+savePrefix = "myTree";
+
+// load
+~tree = MDCommandTree.new;
+if (~tree.importJSONFile(jsonPath)) {
+    "✅ Loaded tree for editing.".postln;
+} {
+    "❌ Failed to load tree JSON".warn; ^nil;
+};
+
+// helpers
+ensureChildUnder = { arg parentNode, childName, fretNumber;
+    var existingNode, createdNode;
+    existingNode = parentNode.getChildByName(childName);
+    if (existingNode.notNil) {
+        existingNode
+    } {
+        createdNode = ~tree.addNode(parentNode.id, childName, fretNumber);
+        if (createdNode.isNil) { ("⚠️ addNode failed for " ++ childName).postln };
+        createdNode
+    }
+};
+
+ensurePath = { arg pathArray, fretArray;
+    var currentNode, stepIndex, childName, fretNumber, pathSize;
+    currentNode = ~tree.root;
+    pathSize = pathArray.size;
+    stepIndex = 0;
+    while({ stepIndex < pathSize }, {
+        childName = pathArray[stepIndex];
+        fretNumber = fretArray[stepIndex] ? 1;
+        currentNode = ensureChildUnder.(currentNode, childName, fretNumber);
+        stepIndex = stepIndex + 1;
+    });
+    currentNode
+};
+
+// ---- add demo verbs (idempotent) ----
+rootNode = ~tree.root;
+commandsNode = ensureChildUnder.(rootNode, "commands", 10);
+
+// commands/add/<proc>
+ensurePath.(["commands","add","delay"],   [10,1,1]);
+ensurePath.(["commands","add","chorus"],  [10,1,2]);
+ensurePath.(["commands","add","reverb"],  [10,1,3]);
+ensurePath.(["commands","add","tremolo"], [10,1,4]);
+
+// commands/bypass/<proc>/<on|off>
+ensurePath.(["commands","bypass","delay","on"],  [10,2,1,2]);
+ensurePath.(["commands","bypass","delay","off"], [10,2,1,3]);
+
+// commands/switch
+ensurePath.(["commands","switch"], [10,3]);
+
+// commands/setSource/<src>
+ensurePath.(["commands","setSource","testmelody"], [10,4,1]);
+
+// set payloads == names (simple, visible)
+~tree.assignPayloads;
+~tree.printTreePretty;
+
+// save using custom exporter (preserves payloads in JSON)
+~ct_writeJsonWithPayloads.(~tree, jsonPath, true, saveFolder, savePrefix);
+)
+/* MagicProcessorLibrary_defs.scd
+   Register a few defaults. Keep this file small and readable.
+*/
+(
+var lib, define;
+
+lib = MagicProcessorLibrary.new;
+
+define = { arg key, func; lib.register(key, func) };
+
+// Sources
+define.(\ts0, {
+    var inputSignal;
+    inputSignal = Silent.ar((0..1));
+    inputSignal * 1.0
+});
+
+// Effects – same as in bootstrap, or your refined versions
+define.(\delay, {
+    var inputSignal, time, fb, mix, delayed;
+    inputSignal = \in.ar;
+    time = \time.kr(0.35).clip(0.01, 2.0);
+    fb   = \fb.kr(0.35).clip(0.0, 0.95);
+    mix  = \mix.kr(0.25).clip(0.0, 1.0);
+    delayed = CombC.ar(inputSignal, 2.0, time, time * (fb * 6 + 0.1));
+    XFade2.ar(inputSignal, delayed, (mix * 2 - 1))
+});
+
+define.(\tremolo, {
+    var inputSignal, rate, depth;
+    inputSignal = \in.ar;
+    rate  = \rate.kr(5).clip(0.1, 20);
+    depth = \depth.kr(0.5).clip(0, 1);
+    inputSignal * SinOsc.kr(rate).range(1 - depth, 1)
+});
+
+define.(\reverb, {
+    var inputSignal, mix, room, damp;
+    inputSignal = \in.ar;
+    mix  = \mix.kr(0.25).clip(0, 1);
+    room = \room.kr(0.5).clip(0, 1);
+    damp = \damp.kr(0.3).clip(0, 1);
+    XFade2.ar(inputSignal, FreeVerb2.ar(inputSignal[0], inputSignal[1], mix, room, damp), 0)
+});
+
+define.(\chorus, {
+    var inputSignal, rate, depth, baseDelay, modDelay;
+    inputSignal = \in.ar;
+    rate      = \rate.kr(0.8).clip(0.1, 5);
+    depth     = \depth.kr(0.008).clip(0.0, 0.02);
+    baseDelay = \base.kr(0.020).clip(0.0, 0.05);
+    modDelay  = baseDelay + (SinOsc.kr(rate, 0, depth));
+    DelayC.ar(inputSignal, 0.1, modDelay)
+});
+
+define.(\drive, {
+    var inputSignal, gain;
+    inputSignal = \in.ar;
+    gain = \gain.kr(2.5).clip(1, 10);
+    (inputSignal * gain).tanh
+});
+
+// Expose the library in a tilde var for convenience
+~procLib = lib;
+
+// Ensure a basic set now (optional; you can call ensureFromChain later)
+~procLib.ensureMany(~procLib.keys, 2);
+)
+// Manage_MagicDisplayGUI_Singleton.scd
+// v0.1
+// MD 20250917-1230
+//
+// Purpose: Close any existing MagicDisplayGUI windows and spawn one fresh GUI,
+//          then (optionally) create/recreate ~mpb bound to that GUI.
+// Style: tilde vars, var-first, lowercase names, AppClock for GUI ops.
+//        no server.sync; server ops should happen elsewhere.
+
+(
+var closeExisting, createNew;
+
+closeExisting = {
+    AppClock.sched(0.0, {
+        var wins;
+        wins = Window.allWindows.select({ arg w;
+            (w.name ? "").asString.beginsWith("MagicDisplayGUI")
+        });
+        wins.do({ arg w; w.close });
+        nil
+    });
+};
+
+createNew = {
+    AppClock.sched(0.05, {
+        ~gui = MagicDisplayGUI.new;
+        ~mpb = MagicPedalboardNew.new(~gui);
+        nil
+    });
+};
+
+closeExisting.value;
+createNew.value;
+)
+// QuickRestore_AudioAndExclusive.scd
+// v0.2
+// MD 20250917-1338
+//
+// Purpose: If audio is quiet, rebuild class-managed wiring (uses Ndef(left) <<> Ndef(right))
+//          and re-enforce Option A. No sink-source overwrites.
+
+(
+var log; log = { arg s; ("[RESTORE] " ++ s).postln };
+
+if(~mpb.isNil) { "[RESTORE] ~mpb is nil".warn; ^nil };
+
+Server.default.bind({
+    ~mpb.rebuildUnbound(~mpb.currentChain);   // internally uses Ndef(left) <<> Ndef(right)
+    ~mpb.rebuildUnbound(~mpb.nextChain);
+});
+~mpb.playCurrent;
+~mpb.enforceExclusiveCurrentOptionA(0.1);
+
+AppClock.sched(0.25, {
+    var a = Ndef(\chainA).isPlaying, b = Ndef(\chainB).isPlaying;
+    ("[RESTORE] [PLAY] A=% B=%".format(a, b)).postln;
+    nil
+});
+)
+(
+// retargetMeters.scd
+// v0.1
+// MD 20250916
+
+var ensureAudioRateAndReloadMeters, hasGui;
+
+ensureAudioRateAndReloadMeters = {
+    hasGui = (~gui.notNil) and: { ~gui.isKindOf(MagicDisplayGUI) };
+
+    // Turn meters off to free Synths/OSCdefs cleanly
+    if(hasGui) { ~gui.enableMeters(false) };
+
+    // Ensure sinks are audio-rate proxies (2 channels)
+    Ndef(\chainA).ar(2);
+    Ndef(\chainB).ar(2);
+
+    // Turn meters back on; will now bind to the audio buses
+    if(hasGui) { ~gui.enableMeters(true) };
+
+    "[meters] reattached to audio-rate buses".postln;
+};
+
+ensureAudioRateAndReloadMeters.();
+)
+// switchDelayCheck.scd
+// v0.1
+// MD 20250916
+
+(
+// Goal: add \delay to NEXT, switch with a crossfade, and confirm audio continues on CURRENT.
+
+// --- Preconditions: GUI + MPB exist; audibleSanity.scd already run today. ---
+
+var log, cleanupDirectPlays, prepStatus, addDelayToNext, doSwitch, afterSwitchCheck, recoverIfSilent;
+
+log = { arg m; ("[switchDelay] " ++ m).postln };
+
+cleanupDirectPlays = {
+    // ensure no direct-to-out play is active for the generator
+    if(Ndef(\testmelody).isPlaying) { Ndef(\testmelody).stop; log.("stopped direct \\testmelody") };
+};
+
+prepStatus = {
+    ~mpb.printChains;
+    ("[before] A=%  B=%"
+        .format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
+};
+
+addDelayToNext = {
+    ~mpb.clearChain;            // keep NEXT minimal before adding
+    ~mpb.add(\delay);           // add to NEXT
+    ~mpb.printChains;
+};
+
+doSwitch = {
+    ~mpb.switchChain(0.12);     // short crossfade; CURRENT <-> NEXT
+};
+
+afterSwitchCheck = {
+    AppClock.sched(0.35, {
+        ~mpb.printChains;
+        ("[after]  A=%  B=%"
+            .format(Ndef(\chainA).isPlaying, Ndef(\chainB).isPlaying)).postln;
+        nil
+    });
+};
+
+// If for any reason we went silent, rebuild connections & enforce CURRENT-only play.
+// (Equivalent to your enforceExclusiveCurrentNow utilities)
+recoverIfSilent = {
+    AppClock.sched(0.60, {
+        var curEff, curSink;
+        curEff = ~mpb.effectiveCurrent;
+        curSink = curEff[0];
+        Server.default.bind({
+            ~mpb.rebuildUnbound(~mpb.currentChain);
+            ~mpb.rebuildUnbound(~mpb.nextChain);
+            // enforce exclusive current
+            if(curSink == \chainA) {
+                if(Ndef(\chainB).isPlaying) { Ndef(\chainB).stop };
+                if(Ndef(\chainA).isPlaying.not) { Ndef(\chainA).play(numChannels: 2) };
+            }{
+                if(Ndef(\chainA).isPlaying) { Ndef(\chainA).stop };
+                if(Ndef(\chainB).isPlaying.not) { Ndef(\chainB).play(numChannels: 2) };
+            };
+        });
+        log.("reconnect enforced, currentEff=" ++ curEff);
+        nil
+    });
+};
+
+// --- run steps ---
+cleanupDirectPlays.value;
+prepStatus.value;
+addDelayToNext.value;
+doSwitch.value;
+afterSwitchCheck.value;
+recoverIfSilent.value;
+)
+// utils_mpb_force_reconnect.scd
+// v0.2
+// MD 20250916-1057
+
+(
+~mpb_forceReconnect = { arg pedalboard;
+    var log, connectPair, reconnectList, effCur, effNext, sinkCur, sinkNext, indexCounter, lastIndex;
+
+    log = { arg txt; ("[FIX] " ++ txt).postln };
+
+    connectPair = { arg leftKey, rightKey;
+        Server.default.bind({
+            // Correct JITLib embed operator used in your project:
+            Ndef(leftKey) <<> Ndef(rightKey);
+        });
+    };
+
+    reconnectList = { arg listSymbols;
+        indexCounter = 0;
+        lastIndex = listSymbols.size - 1;
+        while({ indexCounter < lastIndex }, {
+            connectPair.(listSymbols[indexCounter], listSymbols[indexCounter + 1]);
+            indexCounter = indexCounter + 1;
+        });
+    };
+
+    effCur = pedalboard.effectiveCurrent;
+    effNext = pedalboard.effectiveNext;
+
+    reconnectList.(effCur);
+    reconnectList.(effNext);
+
+    sinkCur = effCur[0];
+    sinkNext = effNext[0];
+
+    Server.default.bind({
+        if(Ndef(sinkCur).isPlaying.not) { Ndef(sinkCur).play(numChannels: 2) };
+        if(Ndef(sinkNext).isPlaying)    { Ndef(sinkNext).stop };
+    });
+
+    log.("forceReconnect done. current=" ++ effCur ++ "  next=" ++ effNext);
+};
+)
